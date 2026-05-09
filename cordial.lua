@@ -1,0 +1,2184 @@
+-- ============================================================
+--  Chord Generator  –  Phase 3
+--  Adds: melody layer with 8 generation presets, rigidity,
+--        colour (chromatic passing tones), min/max duration,
+--        metre (beat placement enforcement), live preview
+--
+--  Requires: ReaImGui extension (install via ReaPack)
+-- ============================================================
+
+local ctx = reaper.ImGui_CreateContext("Chord Generator")
+
+-- ----------------------------------------------------------------
+--  MUSIC THEORY TABLES
+-- ----------------------------------------------------------------
+local NOTE_NAMES = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" }
+
+local CHORD_INTERVALS = {
+  ["maj"]  = {0,4,7},    ["min"]  = {0,3,7},
+  ["maj7"] = {0,4,7,11}, ["min7"] = {0,3,7,10},
+  ["dom7"] = {0,4,7,10}, ["dim"]  = {0,3,6},
+  ["dim7"] = {0,3,6,9},  ["aug"]  = {0,4,8},
+  ["sus2"] = {0,2,7},    ["sus4"] = {0,5,7},
+  ["maj9"] = {0,4,7,11,14}, ["min9"] = {0,3,7,10,14},
+  ["add9"] = {0,4,7,14},
+}
+
+local MODE_CHORDS = {
+  lydian         = {"maj","min","min","maj","maj","min","dim"},
+  lydian_dom     = {"maj","min","min","maj","min","dim","maj"},
+  mixolydian     = {"maj","min","min","maj","min","min","maj"},
+  major          = {"maj","min","min","maj","maj","min","dim"},
+  minor          = {"min","dim","maj","min","min","maj","maj"},
+  dorian         = {"min","min","maj","maj","min","dim","maj"},
+  phrygian       = {"min","maj","maj","min","dim","maj","min"},
+  locrian        = {"dim","maj","min","min","maj","maj","min"},
+  harmonic_minor = {"min","dim","aug","min","maj","maj","dim"},
+}
+local MODE_NAMES   = {
+  "major","lydian","lydian_dom","mixolydian",
+  "minor","dorian","phrygian","locrian","harmonic_minor"
+}
+local MODE_DISPLAY = {
+  "Major","Lydian","Lydian Dom","Mixolydian",
+  "Minor (nat.)","Dorian","Phrygian","Locrian","Harmonic Minor"
+}
+local SCALE_INTERVALS = {
+  major          = {0,2,4,5,7,9,11},
+  lydian         = {0,2,4,6,7,9,11},
+  lydian_dom     = {0,2,4,6,7,9,10},
+  mixolydian     = {0,2,4,5,7,9,10},
+  minor          = {0,2,3,5,7,8,10},
+  dorian         = {0,2,3,5,7,9,10},
+  phrygian       = {0,1,3,5,7,8,10},
+  locrian        = {0,1,3,5,6,8,10},
+  harmonic_minor = {0,2,3,5,7,8,11},
+}
+
+-- ----------------------------------------------------------------
+--  PROGRESSION / FLAVOUR PRESETS
+--  Each entry encodes:
+--    name     = display name
+--    degrees  = scale degree sequence (1-7)
+--    qualities = per-chord quality override (nil = follow mode default)
+--    category = grouping label
+--
+--  nil quality means "use whatever the current mode dictates".
+--  A non-nil quality overrides the mode for that chord slot.
+-- ----------------------------------------------------------------
+local PROGRESSIONS = {
+  -- ── Diatonic (mode-following) ───────────────────────────────
+  {cat="Diatonic",  name="I  IV  V  I",      degrees={1,4,5,1},   qualities={nil,nil,nil,nil}},
+  {cat="Diatonic",  name="I  V  vi  IV",     degrees={1,5,6,4},   qualities={nil,nil,nil,nil}},
+  {cat="Diatonic",  name="I  IV  vi  V",     degrees={1,4,6,5},   qualities={nil,nil,nil,nil}},
+  {cat="Diatonic",  name="ii  V  I  I",      degrees={2,5,1,1},   qualities={nil,nil,nil,nil}},
+  {cat="Diatonic",  name="I  vi  IV  V",     degrees={1,6,4,5},   qualities={nil,nil,nil,nil}},
+  {cat="Diatonic",  name="vi  IV  I  V",     degrees={6,4,1,5},   qualities={nil,nil,nil,nil}},
+  {cat="Diatonic",  name="I  iii  IV  V",    degrees={1,3,4,5},   qualities={nil,nil,nil,nil}},
+  {cat="Diatonic",  name="I  IV  I  V",      degrees={1,4,1,5},   qualities={nil,nil,nil,nil}},
+
+  -- ── Ambient / Sus ───────────────────────────────────────────
+  {cat="Ambient",   name="I  Vsus4  I  IVsus2",   degrees={1,5,1,4},   qualities={"maj","sus4","maj","sus2"}},
+  {cat="Ambient",   name="Isus2  IVadd9  V  vi",  degrees={1,4,5,6},   qualities={"sus2","add9",nil,nil}},
+  {cat="Ambient",   name="I  Isus2  Isus4  I",    degrees={1,1,1,1},   qualities={"maj","sus2","sus4","maj"}},
+  {cat="Ambient",   name="vi  IVadd9  Isus2  V",  degrees={6,4,1,5},   qualities={nil,"add9","sus2",nil}},
+  {cat="Ambient",   name="IVmaj7  Imaj7  vi  V",  degrees={4,1,6,5},   qualities={"maj7","maj7",nil,nil}},
+  {cat="Ambient",   name="I  IVsus2  vi  Vsus4",  degrees={1,4,6,5},   qualities={"maj","sus2","min","sus4"}},
+
+  -- ── Neo-Soul / R&B ──────────────────────────────────────────
+  {cat="Neo-Soul",  name="Imaj7  IVmaj7  iii7  vi7",   degrees={1,4,3,6},  qualities={"maj7","maj7","min7","min7"}},
+  {cat="Neo-Soul",  name="ii7  V7  Imaj7  VIdom7",     degrees={2,5,1,6},  qualities={"min7","dom7","maj7","dom7"}},
+  {cat="Neo-Soul",  name="Imaj9  vi7  ii7  Vsus4",     degrees={1,6,2,5},  qualities={"maj9","min7","min7","sus4"}},
+  {cat="Neo-Soul",  name="IVmaj7  iii7  ii7  V7",      degrees={4,3,2,5},  qualities={"maj7","min7","min7","dom7"}},
+  {cat="Neo-Soul",  name="I  bVII  IV  I",             degrees={1,7,4,1},  qualities={"maj7","maj","maj7","maj7"}},
+  {cat="Neo-Soul",  name="vi7  IVmaj7  Imaj7  V7",     degrees={6,4,1,5},  qualities={"min7","maj7","maj7","dom7"}},
+
+  -- ── Jazz Ballad ─────────────────────────────────────────────
+  {cat="Jazz",      name="Imaj7  vi7  ii7  V7",        degrees={1,6,2,5},  qualities={"maj7","min7","min7","dom7"}},
+  {cat="Jazz",      name="ii7  V7  Imaj7  Imaj7",      degrees={2,5,1,1},  qualities={"min7","dom7","maj7","maj7"}},
+  {cat="Jazz",      name="iii7  vi7  ii7  V7",         degrees={3,6,2,5},  qualities={"min7","min7","min7","dom7"}},
+  {cat="Jazz",      name="Imaj7  IV7  iii7  bVII7",    degrees={1,4,3,7},  qualities={"maj7","dom7","min7","dom7"}},
+  {cat="Jazz",      name="vi7  II7  ii7  V7",          degrees={6,2,2,5},  qualities={"min7","dom7","min7","dom7"}},
+  {cat="Jazz",      name="Imaj7  bIIImaj7  bVImaj7  bII7", degrees={1,3,6,2}, qualities={"maj7","maj7","maj7","dom7"}},
+
+  -- ── Gospel ──────────────────────────────────────────────────
+  {cat="Gospel",    name="I  IV  I  V7",               degrees={1,4,1,5},  qualities={"maj","maj","maj","dom7"}},
+  {cat="Gospel",    name="I  IV  V7  I",               degrees={1,4,5,1},  qualities={"maj","maj","dom7","maj"}},
+  {cat="Gospel",    name="I  bVII  IV  I",             degrees={1,7,4,1},  qualities={"maj","maj","maj","maj"}},
+  {cat="Gospel",    name="vi  IV  I  V7",              degrees={6,4,1,5},  qualities={"min","maj","maj","dom7"}},
+  {cat="Gospel",    name="I  III7  IV  iv",            degrees={1,3,4,4},  qualities={"maj","dom7","maj","min"}},
+
+  -- ── Cinematic ───────────────────────────────────────────────
+  {cat="Cinematic", name="i  bVI  bVII  i",            degrees={1,6,7,1},  qualities={"min","maj","maj","min"}},
+  {cat="Cinematic", name="i  iv  bVI  V",              degrees={1,4,6,5},  qualities={"min","min","maj","maj"}},
+  {cat="Cinematic", name="Imaj7  bVImaj7  bVIImaj7  I",degrees={1,6,7,1},  qualities={"maj7","maj7","maj7","maj"}},
+  {cat="Cinematic", name="i  VII  VI  VII",            degrees={1,7,6,7},  qualities={"min","maj","maj","maj"}},
+  {cat="Cinematic", name="i  bIII  bVI  bVII",         degrees={1,3,6,7},  qualities={"min","maj","maj","maj"}},
+  {cat="Cinematic", name="Iaug  bVI  bVII  i",         degrees={1,6,7,1},  qualities={"aug","maj","maj","min"}},
+
+  -- ── Modal Colour ────────────────────────────────────────────
+  {cat="Modal",     name="i  II  bVII  i  (Phryg)",   degrees={1,2,7,1},  qualities={"min","maj","maj","min"}},
+  {cat="Modal",     name="I  II  I  II  (Lyd)",        degrees={1,2,1,2},  qualities={"maj","maj","maj","maj"}},
+  {cat="Modal",     name="I  bVII  IV  I  (Mixo)",     degrees={1,7,4,1},  qualities={"maj","maj","maj","maj"}},
+  {cat="Modal",     name="i  iv  i  VII  (Dor)",       degrees={1,4,1,7},  qualities={"min","min","min","maj"}},
+  {cat="Modal",     name="i  VI  III  VII  (Dor)",     degrees={1,6,3,7},  qualities={"min","maj","maj","maj"}},
+
+  -- ── Custom ──────────────────────────────────────────────────
+  {cat="Custom",    name="Custom",                     degrees={},         qualities={}},
+}
+
+-- (PROG_NAMES, QUALITY_LIST, QUALITY_DISPLAY replaced by grouped item tables below)
+
+-- Arp rate options
+local ARP_RATES = {
+  {label="1/4",   beats=1.0},
+  {label="1/8",   beats=0.5},
+  {label="1/16",  beats=0.25},
+  {label="1/16T", beats=1/6},
+  {label="1/32",  beats=0.125},
+}
+local ARP_RATE_NAMES = {}
+for _, r in ipairs(ARP_RATES) do ARP_RATE_NAMES[#ARP_RATE_NAMES+1] = r.label end
+
+-- Accent grid options
+local ACCENT_GRID = {
+  {label="1/4",   beats=1.0},
+  {label="1/8",   beats=0.5},
+  {label="1/16",  beats=0.25},
+  {label="1/16T", beats=1/6},
+  {label="1/32",  beats=0.125},
+}
+local ACCENT_GRID_NAMES = {}
+for _, g in ipairs(ACCENT_GRID) do ACCENT_GRID_NAMES[#ACCENT_GRID_NAMES+1] = g.label end
+
+local ARP_PATTERNS = {"Up","Down","Up-Down","Down-Up","Random","Chord"}
+
+-- Melody duration grid — all valid note lengths in beats (quarter = 1 beat)
+local MEL_DURATIONS = {
+  {label="1/32", beats=0.125},
+  {label="1/16", beats=0.25},
+  {label="1/8",  beats=0.5},
+  {label="1/4",  beats=1.0},
+  {label="3/8",  beats=1.5},   -- dotted 1/4
+  {label="1/2",  beats=2.0},
+  {label="3/4",  beats=3.0},   -- dotted 1/2
+  {label="1/1",  beats=4.0},
+}
+local MEL_DUR_NAMES = {}
+for _, d in ipairs(MEL_DURATIONS) do MEL_DUR_NAMES[#MEL_DUR_NAMES+1] = d.label end
+
+-- Melody generation presets
+local MEL_PRESETS = {
+  "Free",           -- 1: weighted random walk, gap fill, chord-tone bias
+  "Flowing",        -- 2: smooth noise-driven pitch curve, stepwise
+  "Structured",     -- 3: contour following + rhythmic motif repetition
+  "Conversational", -- 4: Markov chain + tension/release
+  "Mechanical",     -- 5: strict intervallic rules, minimal randomness
+  "Phrase & Answer",-- 6: antecedent/consequent call-and-response
+  "Fractal",        -- 7: L-system style self-similar motif expansion
+  "Motif",          -- 8: seed cell repeated with variation
+}
+
+-- ----------------------------------------------------------------
+--  STATE
+-- ----------------------------------------------------------------
+local state = {
+  root_idx  = 1,
+  mode_idx  = 1,
+  octave    = 4,
+
+  prog_idx         = 1,
+  custom_degrees   = {1,4,5,1},
+  chord_durations  = {},
+  chord_inversions = {},
+  chord_quality_overrides = {},  -- nil entry = follow mode; string = override quality
+
+  -- Chord layer
+  chord_track_name = "Chords",
+  chord_channel    = 0,
+  chord_enabled    = true,
+  chord_velocity   = 80,
+
+  -- Arp layer
+  arp_enabled      = true,
+  arp_track_name   = "Arp",
+  arp_channel      = 1,
+  arp_rate_idx     = 3,
+  arp_pattern_idx  = 1,
+  arp_octaves      = 2,
+  arp_gate         = 80,
+  arp_velocity     = 90,
+  arp_vel_human    = 15,
+  arp_note_prob    = 100,
+  arp_beat1_prob   = 100,
+  arp_beatn_prob   = 100,
+  arp_beatn_idx    = 2,
+  arp_rigidity     = 0,
+
+  -- Melody layer
+  mel_enabled      = true,
+  mel_track_name   = "Melody",
+  mel_channel      = 2,          -- 0-based (MIDI ch 3)
+  mel_preset_idx   = 1,          -- index into MEL_PRESETS
+  mel_min_dur_idx  = 2,          -- default min = 1/16
+  mel_max_dur_idx  = 6,          -- default max = 1/2
+  mel_velocity     = 85,
+  mel_vel_human    = 20,
+  mel_oct_min      = 4,          -- minimum octave for melody
+  mel_oct_max      = 5,          -- maximum octave for melody
+  mel_rest_prob    = 15,         -- % chance of a rest at each note position
+  mel_rigidity     = 30,         -- 0=chord tones only, 100=full scale (post-filter)
+  mel_colour       = 0,          -- 0=scale only, 100=chromatic passing tones allowed
+  mel_metre        = 50,         -- 0=free (no beat awareness), 100=strong beat enforcement
+
+  -- Melody live preview
+  mel_live_enabled  = false,
+  mel_live_note     = -1,
+  mel_live_note_end = -1,
+  mel_live_events   = nil,
+  mel_live_total_beats = 0,
+  mel_live_last_idx = -1,
+  mel_wait_boundary = false,
+
+  -- Seed / keep
+  seed        = math.floor(reaper.time_precise() * 1000) % 99999,
+  seed_str    = "",
+  seed_locked = false,
+
+  -- PPQ
+  ppq_per_beat = 960,
+
+  -- Time signature
+  timesig_num   = 4,
+  timesig_denom = 4,
+
+  -- Live chord preview
+  live_enabled        = false,
+  last_chord_idx      = -1,
+  last_notes_on       = {},
+  chord_wait_boundary = false,
+
+  -- Live arp preview
+  arp_live_enabled     = false,
+  arp_live_notes_on    = {},
+  arp_live_note_end    = -1,
+  arp_live_last_idx    = -1,
+  arp_live_events      = nil,
+  arp_live_total_beats = 0,
+  arp_wait_boundary    = false,
+
+  status_msg = "Ready.",
+}
+
+local function init_chord_arrays(n)
+  state.chord_durations       = {}
+  state.chord_inversions      = {}
+  state.chord_quality_overrides = {}
+  for i = 1, n do
+    state.chord_durations[i]        = 1
+    state.chord_inversions[i]       = 0
+    state.chord_quality_overrides[i] = nil  -- auto = follow mode
+  end
+end
+
+-- Load quality overrides from a preset's qualities array.
+-- nil entries in the preset become nil overrides (auto).
+local function load_preset_qualities(preset, n)
+  state.chord_quality_overrides = {}
+  for i = 1, n do
+    local q = preset.qualities and preset.qualities[i]
+    state.chord_quality_overrides[i] = q  -- nil or quality string
+  end
+end
+init_chord_arrays(4)
+load_preset_qualities(PROGRESSIONS[state.prog_idx], 4)
+state.seed_str = tostring(state.seed)
+
+-- ----------------------------------------------------------------
+--  SEEDED RNG
+-- ----------------------------------------------------------------
+local function rng_seed(s) math.randomseed(s) end
+local function rng_float()  return math.random() end
+local function rng_int(a,b) return math.random(a,b) end
+
+-- ----------------------------------------------------------------
+--  TIME SIGNATURE HELPERS
+-- ----------------------------------------------------------------
+local function get_timesig_at(proj_time)
+  local num, denom = 4, 4
+  local n = reaper.CountTempoTimeSigMarkers(0)
+  for i = 0, n-1 do
+    local ok, mtime, _, _, tnum, tdenom = reaper.GetTempoTimeSigMarker(0, i)
+    if ok and mtime <= proj_time then
+      if tnum  > 0 then num   = tnum  end
+      if tdenom > 0 then denom = tdenom end
+    end
+  end
+  return num, denom
+end
+local function get_timesig_at_cursor()  return get_timesig_at(reaper.GetCursorPosition()) end
+local function get_timesig_at_playpos() return get_timesig_at(reaper.GetPlayPosition())   end
+local function bars_to_beats(bars, num) return bars * num end
+
+-- ----------------------------------------------------------------
+--  MUSIC THEORY HELPERS
+-- ----------------------------------------------------------------
+local function midi_note(note_idx, octave)
+  return (octave + 1) * 12 + (note_idx - 1)
+end
+
+local function degree_root_midi(root_idx, mode, deg, octave)
+  return midi_note(root_idx, octave) + SCALE_INTERVALS[mode][deg]
+end
+
+local function build_chord(root_midi, quality, inversion)
+  local ivs = CHORD_INTERVALS[quality] or CHORD_INTERVALS["maj"]
+  local notes = {}
+  for _, iv in ipairs(ivs) do notes[#notes+1] = root_midi + iv end
+  local inv = inversion % #notes
+  for _ = 1, inv do
+    local lo = table.remove(notes, 1)
+    notes[#notes+1] = lo + 12
+  end
+  return notes
+end
+
+local function current_degrees()
+  local p = PROGRESSIONS[state.prog_idx]
+  return (p.name == "Custom") and state.custom_degrees or p.degrees
+end
+
+local function build_progression()
+  local degrees   = current_degrees()
+  local mode      = MODE_NAMES[state.mode_idx]
+  local qualities = MODE_CHORDS[mode]
+  local num       = state.timesig_num
+  local result    = {}
+  for i, deg in ipairs(degrees) do
+    -- Quality: use per-chord override if set, else mode default
+    local override = state.chord_quality_overrides[i]
+    local quality  = override or qualities[deg] or "maj"
+    local root_m   = degree_root_midi(state.root_idx, mode, deg, state.octave)
+    local inv      = state.chord_inversions[i] or 0
+    local dur_bars = state.chord_durations[i]  or 1
+    local dur_beats = bars_to_beats(dur_bars, num)
+    local notes    = build_chord(root_m, quality, inv)
+    local root_name = NOTE_NAMES[(root_m % 12) + 1]
+    local override_marker = override and ("*"..override) or ""
+    result[#result+1] = {
+      notes    = notes,
+      quality  = quality,
+      degree   = deg,
+      duration = dur_beats,
+      dur_bars = dur_bars,
+      is_override = override ~= nil,
+      label    = root_name.." "..quality..(inv>0 and (" inv"..inv) or "")
+                 ..(override and " *" or ""),
+    }
+  end
+  return result
+end
+
+-- Return sorted list of scale MIDI pitches across mel_oct_min..mel_oct_max
+local function scale_notes_in_range()
+  local mode     = MODE_NAMES[state.mode_idx]
+  local ivs      = SCALE_INTERVALS[mode]
+  local root_pc  = (state.root_idx - 1) % 12
+  local notes    = {}
+  for oct = state.mel_oct_min - 1, state.mel_oct_max do
+    for _, iv in ipairs(ivs) do
+      local p = (oct + 1) * 12 + ((root_pc + iv) % 12)
+      if p >= (state.mel_oct_min) * 12 and p <= (state.mel_oct_max + 1) * 12 - 1 then
+        notes[#notes+1] = p
+      end
+    end
+  end
+  table.sort(notes)
+  -- Deduplicate
+  local deduped = {}
+  for i, n in ipairs(notes) do
+    if i == 1 or n ~= notes[i-1] then deduped[#deduped+1] = n end
+  end
+  return deduped
+end
+
+-- Return chord tone pitches within the melody range
+local function chord_notes_in_range(chord_notes)
+  local pcs = {}
+  for _, n in ipairs(chord_notes) do pcs[n % 12] = true end
+  local result = {}
+  for p = state.mel_oct_min * 12, (state.mel_oct_max + 1) * 12 - 1 do
+    if pcs[p % 12] then result[#result+1] = p end
+  end
+  return result
+end
+
+-- Find index of nearest note in a sorted list to a given pitch
+local function nearest_idx(notes, pitch)
+  local best, best_dist = 1, 999
+  for i, n in ipairs(notes) do
+    local d = math.abs(n - pitch)
+    if d < best_dist then best, best_dist = i, d end
+  end
+  return best
+end
+
+-- ----------------------------------------------------------------
+--  GRID-QUANTISED MELODY PLACEMENT
+--
+--  Core principle: every note onset and endpoint is expressed as
+--  an integer number of grid steps. The grid step = min duration.
+--  Floating point only appears when converting to beats for output.
+--  Accumulation drift is impossible because all arithmetic is integer.
+--
+--  Metre controls which grid slots are eligible for note onsets:
+--    0   = any slot (fully free)
+--    50  = quarter-note beats and stronger preferred
+--    100 = only the strongest beats (downbeat, mid-bar)
+-- ----------------------------------------------------------------
+
+-- Return the metrical weight of a grid slot position.
+-- slot_abs = absolute position in grid steps from project start.
+-- grid     = beats per grid step (min duration in beats).
+local function metrical_weight(slot_abs, grid)
+  local abs_beat    = slot_abs * grid
+  local num         = state.timesig_num
+  local beat_in_bar = abs_beat % num
+  local tol         = grid * 0.01  -- 1% of grid step tolerance
+
+  -- Downbeat
+  if beat_in_bar < tol then return 1.0 end
+
+  -- Whole beat
+  local beat_frac = beat_in_bar % 1.0
+  if beat_frac < tol or (1.0 - beat_frac) < tol then
+    local beat_num = math.floor(beat_in_bar + 0.5) + 1
+    if num >= 4 and beat_num == math.floor(num / 2) + 1 then
+      return 0.6   -- mid-bar (beat 3 in 4/4)
+    end
+    return 0.35
+  end
+
+  -- Half-beat subdivision
+  if math.abs(beat_frac - 0.5) < tol then return 0.2 end
+
+  -- Off-beat subdivision
+  return 0.1
+end
+
+-- Build a list of valid onset slots within a block, weighted by metre.
+-- block_slots = block duration in grid steps.
+-- abs_start_slot = absolute slot index of block start from project start.
+-- Returns list of {slot, weight} sorted by slot ascending.
+local function build_onset_candidates(block_slots, abs_start_slot, grid)
+  local metre   = state.mel_metre / 100.0
+  local candidates = {}
+
+  for s = 0, block_slots - 1 do
+    local mw = metrical_weight(abs_start_slot + s, grid)
+
+    -- Gate: at metre=0 all slots pass; at metre=1 only strong beats pass.
+    -- A slot is included if its weight exceeds the metre threshold,
+    -- or probabilistically for intermediate values.
+    local include
+    if metre < 0.01 then
+      include = true
+    elseif mw >= 1.0 - 0.01 then
+      include = true   -- downbeats always pass
+    else
+      -- Threshold rises with metre. At metre=1, only weight>=1.0 passes.
+      -- At metre=0.5, weight>=0.5 reliably passes, lower ones probabilistic.
+      local pass_threshold = metre * 0.9  -- weight needed to always pass
+      if mw >= pass_threshold then
+        include = true
+      else
+        -- Probabilistic admission: higher weight = higher chance
+        local admit_prob = mw / pass_threshold
+        include = rng_float() < admit_prob
+      end
+    end
+
+    if include then
+      candidates[#candidates+1] = {slot=s, weight=mw}
+    end
+  end
+
+  -- Always guarantee at least the first slot (downbeat) is a candidate
+  if #candidates == 0 then
+    candidates[1] = {slot=0, weight=1.0}
+  end
+
+  return candidates
+end
+
+-- Pick a duration in grid steps from the valid range.
+-- Prefers longer durations on strong beats, shorter on weak beats.
+-- All arithmetic stays integer (grid steps).
+local function pick_dur_slots(onset_slot, abs_start_slot, grid,
+                               min_slots, max_slots, remaining_slots)
+  local cap    = math.min(max_slots, remaining_slots)
+  if cap < min_slots then return min_slots end
+
+  local mw     = metrical_weight(abs_start_slot + onset_slot, grid)
+  local metre  = state.mel_metre / 100.0
+
+  -- Build list of candidate durations (integer multiples of min_slots
+  -- that correspond to valid MEL_DURATIONS grid values)
+  local valid = {}
+  for _, d in ipairs(MEL_DURATIONS) do
+    local slots = math.floor(d.beats / grid + 0.5)
+    if slots >= min_slots and slots <= cap then
+      -- Avoid duplicates
+      local dup = false
+      for _, v in ipairs(valid) do if v == slots then dup=true; break end end
+      if not dup then valid[#valid+1] = slots end
+    end
+  end
+  if #valid == 0 then return math.min(min_slots, remaining_slots) end
+  table.sort(valid)
+
+  -- Duration bias: strong onset → prefer longer; weak onset → prefer shorter
+  local weights = {}
+  local total   = 0
+  for i, _ in ipairs(valid) do
+    local norm = i / #valid  -- 0..1, short→long
+    local bias
+    if mw >= 0.9 then
+      bias = norm                          -- downbeat: longer preferred
+    elseif mw >= 0.5 then
+      bias = 1.0 - math.abs(norm - 0.5)   -- mid-beat: medium preferred
+    else
+      bias = 1.0 - norm                   -- weak: shorter preferred
+    end
+    bias = math.max(0.05, bias)
+    local w = (1.0 - metre) * (1.0 / #valid) + metre * bias
+    weights[i] = w
+    total = total + w
+  end
+
+  local r = rng_float() * total
+  local acc = 0
+  for i, w in ipairs(weights) do
+    acc = acc + w
+    if r <= acc then
+      -- Endpoint snap: at high metre, extend to fill to next beat boundary
+      local chosen = valid[i]
+      if metre >= 0.5 then
+        local endpoint_slot = onset_slot + chosen
+        local endpoint_abs  = (abs_start_slot + endpoint_slot) * grid
+        local beat_frac     = endpoint_abs % 1.0
+        local tol           = grid * 0.02
+        -- If endpoint is not on a beat, try snapping forward to next beat
+        if beat_frac > tol and (1.0 - beat_frac) > tol then
+          local beats_to_next = 1.0 - beat_frac
+          local snap_slots    = math.floor(beats_to_next / grid + 0.5)
+          local snapped       = chosen + snap_slots
+          if snapped >= min_slots and snapped <= cap then
+            local snap_prob = (metre - 0.5) * 2.0
+            if rng_float() < snap_prob then chosen = snapped end
+          end
+        end
+        -- Phrase-end hold: absorb tiny gap to barline
+        local abs_onset_beat = (abs_start_slot + onset_slot) * grid
+        local bar_remain     = state.timesig_num - (abs_onset_beat % state.timesig_num)
+        if bar_remain < 0.001 then bar_remain = state.timesig_num end
+        local bar_remain_slots = math.floor(bar_remain / grid + 0.5)
+        local gap = bar_remain_slots - chosen
+        if gap > 0 and gap <= min_slots and chosen + gap <= cap then
+          chosen = chosen + gap
+        end
+      end
+      return math.max(min_slots, math.min(cap, chosen))
+    end
+  end
+  return valid[#valid]
+end
+
+-- Plain duration picker for seed-time use (no metre influence)
+local function pick_duration(min_beats, max_beats)
+  local valid = {}
+  for _, d in ipairs(MEL_DURATIONS) do
+    if d.beats >= min_beats - 0.001 and d.beats <= max_beats + 0.001 then
+      valid[#valid+1] = d.beats
+    end
+  end
+  if #valid == 0 then return min_beats end
+  return valid[rng_int(1, #valid)]
+end
+
+-- Apply rigidity post-filter: if note is not a chord tone and
+-- rng < (1 - rigidity/100), snap to nearest chord tone
+local function apply_rigidity(pitch, chord_notes_range)
+  if state.mel_rigidity >= 100 then return pitch end
+  if #chord_notes_range == 0 then return pitch end
+
+  local pcs = {}
+  for _, n in ipairs(chord_notes_range) do pcs[n % 12] = true end
+  if pcs[pitch % 12] then return pitch end  -- already a chord tone
+
+  local snap_prob = 1.0 - (state.mel_rigidity / 100.0)
+  if rng_float() < snap_prob then
+    -- Snap to nearest chord tone
+    local best, best_d = chord_notes_range[1], 999
+    for _, n in ipairs(chord_notes_range) do
+      local d = math.abs(n - pitch)
+      if d < best_d then best, best_d = n, d end
+    end
+    return best
+  end
+  return pitch
+end
+
+-- Optionally insert a chromatic passing tone between two scale pitches.
+-- Only if colour > 0, and only if the two notes are a whole step apart
+-- and a semitone step exists between them.
+local function maybe_insert_chromatic(from_pitch, to_pitch)
+  if state.mel_colour == 0 then return nil end
+  local diff = to_pitch - from_pitch
+  if math.abs(diff) ~= 2 then return nil end  -- only whole steps get passing tones
+  local colour_prob = state.mel_colour / 100.0
+  if rng_float() > colour_prob then return nil end
+  return from_pitch + (diff > 0 and 1 or -1)  -- semitone step toward target
+end
+
+-- ----------------------------------------------------------------
+--  MELODY GENERATORS
+--  Each returns a flat list of {pitch, pos, dur, vel, is_rest}
+--  for a single chord block. pos is relative to block start.
+-- ----------------------------------------------------------------
+
+local function mel_pick_vel()
+  local v = state.mel_velocity + math.floor((rng_float()*2-1) * state.mel_vel_human)
+  return math.max(1, math.min(127, v))
+end
+
+local function mel_min_beats() return MEL_DURATIONS[state.mel_min_dur_idx].beats end
+local function mel_max_beats() return MEL_DURATIONS[state.mel_max_dur_idx].beats end
+
+-- Shared fill function: works entirely in integer grid steps.
+-- grid = min duration in beats = 1 grid step.
+-- All positions are integer multiples of grid — no floating point drift.
+local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
+                               pitch_fn, context)
+  local grid      = mel_min_beats()
+  local abs_start = context.abs_block_start or 0
+
+  -- Convert everything to integer slots
+  local abs_start_slot = math.floor(abs_start / grid + 0.5)
+  local block_slots    = math.floor(block_dur  / grid + 0.5)
+  local min_slots      = 1  -- 1 grid step = min duration by definition
+  local max_slots      = math.floor(mel_max_beats() / grid + 0.5)
+
+  local events = {}
+  local prev   = context.prev_pitch or scale_notes[1] or 60
+  local slot   = 0  -- current slot within block (integer)
+
+  while slot < block_slots do
+    local remaining_slots = block_slots - slot
+
+    -- Build onset candidates from current slot to end of block
+    local sub_slots    = remaining_slots
+    local sub_abs_slot = abs_start_slot + slot
+    local candidates   = build_onset_candidates(sub_slots, sub_abs_slot, grid)
+
+    if #candidates == 0 then break end
+
+    -- Pick the next onset: take the first candidate slot (already filtered
+    -- by metre) — advance slot to that position
+    local next_candidate = candidates[1]
+    local onset_slot     = slot + next_candidate.slot
+
+    -- Fill the gap before this onset as silence (rest/advance)
+    -- The onset decision is separate from pitch — rests are chosen here
+    slot = onset_slot
+
+    if slot >= block_slots then break end
+    remaining_slots = block_slots - slot
+
+    -- Pick duration in slots
+    local dur_slots = pick_dur_slots(
+      slot, abs_start_slot, grid,
+      min_slots, max_slots, remaining_slots
+    )
+
+    -- Rest probability
+    if rng_float() * 100 < state.mel_rest_prob then
+      slot = slot + dur_slots
+    else
+      -- Convert back to beats for the pitch function (which uses beat positions)
+      local pos_beats = slot * grid
+      local dur_beats = dur_slots * grid
+
+      local pitch = pitch_fn(pos_beats, block_dur, chord_notes, scale_notes, prev, context)
+      if pitch then
+        pitch = apply_rigidity(pitch, chord_range)
+        pitch = math.max(state.mel_oct_min * 12,
+                math.min((state.mel_oct_max + 1) * 12 - 1, pitch))
+
+        -- Chromatic passing tone: uses min grid step as its duration
+        local chrom = maybe_insert_chromatic(prev, pitch)
+        if chrom and dur_slots > min_slots then
+          local chrom_dur_beats = grid  -- always exactly 1 grid step
+          events[#events+1] = {
+            pitch=chrom, pos=pos_beats,
+            dur=chrom_dur_beats, vel=mel_pick_vel(), is_rest=false
+          }
+          pos_beats = pos_beats + chrom_dur_beats
+          dur_beats = dur_beats - chrom_dur_beats
+          dur_slots = dur_slots - 1
+          prev = chrom
+        end
+
+        if dur_slots > 0 then
+          events[#events+1] = {
+            pitch=pitch, pos=pos_beats,
+            dur=dur_slots * grid, vel=mel_pick_vel(), is_rest=false
+          }
+          prev = pitch
+        end
+      end
+      slot = slot + dur_slots
+    end
+
+    -- Advance past this candidate to the next: remove slots up to and
+    -- including the one we just consumed from consideration
+    -- (loop continues from slot naturally)
+  end
+
+  context.prev_pitch = prev
+  return events
+end
+
+-- ── 1. FREE ─────────────────────────────────────────────────────
+-- Weighted random walk biased toward chord tones; gap fill after leaps
+local function mel_free(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    local pcs = {}
+    for _, n in ipairs(cn) do pcs[n % 12] = true end
+    -- After a large leap, bias back toward prev (gap fill)
+    local last_leap = c.last_leap or 0
+    local weights = {}
+    local total = 0
+    for i, n in ipairs(sn) do
+      local dist = math.abs(n - prev)
+      local w = 1.0
+      -- Chord tone bonus
+      if pcs[n % 12] then w = w * 3 end
+      -- Stepwise preference
+      if dist <= 2 then w = w * 2 end
+      -- Gap fill: if last move was a big leap, prefer filling back
+      if math.abs(last_leap) > 4 then
+        local fill_dir = last_leap > 0 and (n < prev) or (n > prev)
+        if fill_dir then w = w * 2.5 end
+      end
+      weights[i] = w
+      total = total + w
+    end
+    local r = rng_float() * total
+    local acc = 0
+    for i, w in ipairs(weights) do
+      acc = acc + w
+      if r <= acc then
+        c.last_leap = sn[i] - prev
+        return sn[i]
+      end
+    end
+    return sn[#sn]
+  end
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+end
+
+-- ── 2. FLOWING ──────────────────────────────────────────────────
+-- Smooth noise-driven pitch selection — positions map to a sine curve
+-- offset by the seed, giving a naturally arching contour
+local function mel_flowing(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  local phase = ctx_tbl.flow_phase or (rng_float() * math.pi * 2)
+  local freq  = ctx_tbl.flow_freq  or (0.3 + rng_float() * 0.7)
+  ctx_tbl.flow_phase = phase
+  ctx_tbl.flow_freq  = freq
+
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    local t = pos / bdur
+    -- Smooth value 0..1 following a sine wave
+    local smooth = (math.sin(t * math.pi * 2 * freq + phase) + 1) * 0.5
+    local target_idx = 1 + math.floor(smooth * (#sn - 1))
+    target_idx = math.max(1, math.min(#sn, target_idx))
+    -- Allow ±1 scale step of variation via rng
+    local variation = rng_int(-1, 1)
+    local idx = math.max(1, math.min(#sn, target_idx + variation))
+    return sn[idx]
+  end
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+end
+
+-- ── 3. STRUCTURED ───────────────────────────────────────────────
+-- Follows a seed-chosen contour (arch, valley, ascending, descending, wave)
+-- and generates a repeating rhythmic motif
+local CONTOURS = {"arch","valley","ascending","descending","wave"}
+local function mel_structured(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  if not ctx_tbl.contour then
+    ctx_tbl.contour = CONTOURS[rng_int(1, #CONTOURS)]
+  end
+  if not ctx_tbl.motif_rhythm then
+    -- Generate a short rhythmic motif of 2-4 durations
+    local motif = {}
+    local motif_len = rng_int(2, 4)
+    for _ = 1, motif_len do
+      local d = pick_duration(mel_min_beats(), mel_max_beats())
+      -- At high metre, snap motif durations to whole beats so the motif
+      -- aligns naturally with the bar grid when repeated
+      if state.mel_metre >= 60 then
+        d = math.max(1.0, math.floor(d + 0.5))
+      end
+      motif[#motif+1] = d
+    end
+    ctx_tbl.motif_rhythm = motif
+    ctx_tbl.motif_pos    = 1
+  end
+
+  local contour = ctx_tbl.contour
+  local function contour_target(t)
+    if contour == "arch" then
+      return math.sin(t * math.pi)
+    elseif contour == "valley" then
+      return 1 - math.sin(t * math.pi)
+    elseif contour == "ascending" then
+      return t
+    elseif contour == "descending" then
+      return 1 - t
+    elseif contour == "wave" then
+      return (math.sin(t * math.pi * 4) + 1) * 0.5
+    end
+    return 0.5
+  end
+
+  local events = {}
+  local pos    = 0
+  local prev   = ctx_tbl.prev_pitch or scale_notes[math.ceil(#scale_notes * 0.5)] or 60
+  local motif  = ctx_tbl.motif_rhythm
+  local mi     = ctx_tbl.motif_pos or 1
+
+  while pos < block_dur - 0.001 do
+    local remaining = block_dur - pos
+    local dur = math.min(motif[mi], remaining)
+    if dur < 0.001 then break end
+    mi = (mi % #motif) + 1
+
+    if rng_float() * 100 >= state.mel_rest_prob then
+      local t      = pos / block_dur
+      local cv     = contour_target(t)
+      local ti     = 1 + math.floor(cv * (#scale_notes - 1))
+      ti = math.max(1, math.min(#scale_notes, ti + rng_int(-1, 1)))
+      local pitch  = apply_rigidity(scale_notes[ti], chord_range)
+      pitch = math.max(state.mel_oct_min*12, math.min((state.mel_oct_max+1)*12-1, pitch))
+      local chrom = maybe_insert_chromatic(prev, pitch)
+      if chrom then
+        local cd = math.min(mel_min_beats(), dur * 0.5)
+        events[#events+1] = {pitch=chrom, pos=pos, dur=cd, vel=mel_pick_vel()}
+        pos = pos + cd; dur = dur - cd
+      end
+      if dur > 0.001 then
+        events[#events+1] = {pitch=pitch, pos=pos, dur=dur, vel=mel_pick_vel()}
+        prev = pitch
+      end
+    end
+    pos = pos + dur
+  end
+
+  ctx_tbl.motif_pos  = mi
+  ctx_tbl.prev_pitch = prev
+  return events
+end
+
+-- ── 4. CONVERSATIONAL ───────────────────────────────────────────
+-- Markov-chain style: transition weights based on interval from last note.
+-- Tension tracking: rises away from tonic/chord, resolves toward them.
+local function mel_conversational(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  local tension = ctx_tbl.tension or 0.0
+  local pcs = {}
+  for _, n in ipairs(chord_notes) do pcs[n % 12] = true end
+  local root_pc = (state.root_idx - 1) % 12
+
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    local weights = {}
+    local total   = 0
+    for i, n in ipairs(sn) do
+      local interval = math.abs(n - prev)
+      local w = 1.0
+      -- Markov: prefer steps and small leaps
+      if interval == 0 then w = 0.1          -- avoid repeating same note too much
+      elseif interval <= 2 then w = 3.0      -- stepwise strongly preferred
+      elseif interval <= 4 then w = 1.5      -- small leap ok
+      elseif interval <= 7 then w = 0.7      -- larger leap less likely
+      else w = 0.2 end                        -- big leap rare
+
+      -- Tension resolution: high tension strongly prefers tonic/chord tones
+      local is_chord = pcs[n % 12]
+      local is_tonic = (n % 12) == root_pc
+      if tension > 0.6 then
+        if is_tonic  then w = w * 4 end
+        if is_chord  then w = w * 2 end
+      elseif tension > 0.3 then
+        if is_chord  then w = w * 1.5 end
+      end
+
+      weights[i] = w
+      total = total + w
+    end
+
+    local r = rng_float() * total
+    local acc = 0
+    local chosen = sn[1]
+    for i, w in ipairs(weights) do
+      acc = acc + w
+      if r <= acc then chosen = sn[i]; break end
+    end
+
+    -- Update tension: non-chord tones raise it, chord tones lower it
+    if pcs[chosen % 12] then
+      c.tension = math.max(0, (c.tension or 0) - 0.2)
+    else
+      c.tension = math.min(1, (c.tension or 0) + 0.15)
+    end
+
+    return chosen
+  end
+
+  local evs = mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+  return evs
+end
+
+-- ── 5. MECHANICAL ───────────────────────────────────────────────
+-- Strict intervallic rule: alternates between a fixed interval up and down.
+-- The interval is seed-chosen (3rd, 4th, 5th). Very rhythmically regular.
+local function mel_mechanical(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  if not ctx_tbl.mech_interval then
+    local intervals = {2, 3, 4, 5}  -- scale steps
+    ctx_tbl.mech_interval  = intervals[rng_int(1, #intervals)]
+    ctx_tbl.mech_direction = 1
+  end
+
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    local idx    = nearest_idx(sn, prev)
+    local step   = c.mech_interval * c.mech_direction
+    local new_idx = idx + step
+    -- Bounce at edges
+    if new_idx > #sn then
+      c.mech_direction = -1
+      new_idx = math.max(1, idx - c.mech_interval)
+    elseif new_idx < 1 then
+      c.mech_direction = 1
+      new_idx = math.min(#sn, idx + c.mech_interval)
+    end
+    return sn[math.max(1, math.min(#sn, new_idx))]
+  end
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+end
+
+-- ── 6. PHRASE & ANSWER ──────────────────────────────────────────
+local function mel_phrase_answer(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  local grid = mel_min_beats()
+  -- Snap split to bar boundary at high metre, otherwise seed-driven fraction
+  local split = block_dur * (0.4 + rng_float() * 0.25)
+  if state.mel_metre >= 60 then
+    local num     = state.timesig_num
+    local snapped = math.floor(split / num + 0.5) * num
+    snapped = math.max(num, math.min(block_dur - num, snapped))
+    if snapped > 0 and snapped < block_dur then split = snapped end
+  end
+  -- Snap split to grid
+  split = math.floor(split / grid + 0.5) * grid
+
+  local pcs      = {}
+  for _, n in ipairs(chord_notes) do pcs[n % 12] = true end
+  local root_pc  = (state.root_idx - 1) % 12
+  local phase    = ctx_tbl.pa_phase or 0
+  ctx_tbl.pa_phase = 1 - phase
+  local is_call  = (phase == 0)
+
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    local near_end = (bdur - pos) <= grid * 2
+    local weights  = {}
+    local total    = 0
+    for i, n in ipairs(sn) do
+      local w    = 1.0
+      local dist = math.abs(n - prev)
+      if dist <= 2 then w = w * 2 end
+      if near_end then
+        if is_call then
+          if (n % 12) == root_pc then w = w * 0.1 end
+        else
+          if (n % 12) == root_pc then w = w * 5 end
+          if pcs[n % 12]         then w = w * 2 end
+        end
+      end
+      weights[i] = w; total = total + w
+    end
+    local r = rng_float() * total; local acc = 0
+    for i, w in ipairs(weights) do
+      acc = acc + w
+      if r <= acc then return sn[i] end
+    end
+    return sn[#sn]
+  end
+
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+end
+
+-- ── 7. FRACTAL ──────────────────────────────────────────────────
+local function mel_fractal(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  if not ctx_tbl.fractal_motif then
+    local motif_len = rng_int(3, 5)
+    local motif     = {}
+    local cur_idx   = rng_int(1, #scale_notes)
+    for _ = 1, motif_len do
+      motif[#motif+1] = scale_notes[cur_idx]
+      cur_idx = math.max(1, math.min(#scale_notes, cur_idx + rng_int(-2, 2)))
+    end
+    ctx_tbl.fractal_motif = motif
+    ctx_tbl.fractal_depth = rng_int(1, 2)
+    ctx_tbl.fractal_ei    = 1
+  end
+
+  -- Expand motif
+  local expanded = {table.unpack(ctx_tbl.fractal_motif)}
+  for _ = 1, ctx_tbl.fractal_depth do
+    local new_exp = {}
+    for i = 1, #expanded do
+      new_exp[#new_exp+1] = expanded[i]
+      if i < #expanded then
+        local mid_pitch = (expanded[i] + expanded[i+1]) / 2
+        new_exp[#new_exp+1] = scale_notes[nearest_idx(scale_notes, mid_pitch)]
+      end
+    end
+    expanded = new_exp
+  end
+
+  local ei = ctx_tbl.fractal_ei or 1
+
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    local p = expanded[ei]
+    ei = (ei % #expanded) + 1
+    c.fractal_ei = ei
+    return p
+  end
+
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+end
+
+-- ── 8. MOTIF ────────────────────────────────────────────────────
+local function mel_motif(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  if not ctx_tbl.motif_cell then
+    local cell_len = rng_int(3, 5)
+    local cell     = {}
+    local ci       = rng_int(1, #scale_notes)
+    for _ = 1, cell_len do
+      cell[#cell+1] = { idx=ci, dur=pick_duration(mel_min_beats(), mel_max_beats()) }
+      ci = math.max(1, math.min(#scale_notes, ci + rng_int(-2, 2)))
+    end
+    ctx_tbl.motif_cell   = cell
+    ctx_tbl.motif_ci     = 1
+    ctx_tbl.motif_transp = 0
+  end
+
+  local cell   = ctx_tbl.motif_cell
+  local ci     = ctx_tbl.motif_ci
+  local transp = ctx_tbl.motif_transp
+
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    if ci == 1 and rng_float() < 0.3 then
+      transp = math.max(-3, math.min(3, transp + rng_int(-1, 1)))
+      c.motif_transp = transp
+    end
+    local idx   = math.max(1, math.min(#sn, cell[ci].idx + transp))
+    local pitch = sn[idx]
+    ci = (ci % #cell) + 1
+    c.motif_ci = ci
+    return pitch
+  end
+
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+end
+
+-- Dispatcher
+local MEL_GEN_FNS = {
+  mel_free, mel_flowing, mel_structured, mel_conversational,
+  mel_mechanical, mel_phrase_answer, mel_fractal, mel_motif,
+}
+
+-- Build full melody event list for entire progression.
+-- Returns flat list of {pitch, pos, dur, vel} (pos = absolute beats from item start)
+local function build_melody_events(progression)
+  local gen_fn = MEL_GEN_FNS[state.mel_preset_idx] or mel_free
+  local context = {}   -- persistent state across chord blocks (prev_pitch etc.)
+  local events  = {}
+  local abs_pos = 0
+
+  for _, ch in ipairs(progression) do
+    local scale_notes  = scale_notes_in_range()
+    local chord_range  = chord_notes_in_range(ch.notes)
+    if #scale_notes == 0 then
+      abs_pos = abs_pos + ch.duration
+    else
+      context.abs_block_start = abs_pos  -- absolute beat of this chord block's start
+      local block_evs = gen_fn(ch.duration, ch.notes, scale_notes, chord_range, context)
+      for _, ev in ipairs(block_evs) do
+        events[#events+1] = {
+          pitch = ev.pitch,
+          pos   = abs_pos + ev.pos,
+          dur   = ev.dur,
+          vel   = ev.vel or mel_pick_vel(),
+        }
+      end
+      abs_pos = abs_pos + ch.duration
+    end
+  end
+
+  return events, abs_pos
+end
+
+-- ----------------------------------------------------------------
+--  ARP SCALE HELPERS  (unchanged from phase 2)
+-- ----------------------------------------------------------------
+local function scale_pitch_classes()
+  local mode    = MODE_NAMES[state.mode_idx]
+  local ivs     = SCALE_INTERVALS[mode]
+  local root_pc = (state.root_idx - 1) % 12
+  local pcs     = {}
+  for _, iv in ipairs(ivs) do pcs[(root_pc + iv) % 12] = true end
+  return pcs
+end
+
+local function build_arp_pool(chord_notes, octaves, rigidity_pct)
+  if #chord_notes == 0 then return {} end
+  local scale_pcs = scale_pitch_classes()
+  local chord_set = {}
+  for _, n in ipairs(chord_notes) do chord_set[n % 12] = true end
+  local bass_note  = chord_notes[1]
+  local anchor_oct = math.floor(bass_note / 12) - 1
+  local scale_prob = rigidity_pct / 100.0
+  local pool_set   = {}
+  for oct = 0, octaves - 1 do
+    for pc = 0, 11 do
+      local pitch = (anchor_oct + oct + 1) * 12 + pc
+      if pitch >= bass_note and pitch >= 0 then
+        if chord_set[pc] then
+          pool_set[pitch] = true
+        elseif scale_pcs[pc] and scale_prob > 0 then
+          if rng_float() < scale_prob then pool_set[pitch] = true end
+        end
+      end
+    end
+  end
+  local pool = {}
+  for pitch, _ in pairs(pool_set) do pool[#pool+1] = pitch end
+  table.sort(pool)
+  return pool
+end
+
+local function apply_arp_pattern(pool, pattern_name, rng_seq)
+  if pattern_name == "Up" then return pool
+  elseif pattern_name == "Down" then
+    local r = {}
+    for i = #pool, 1, -1 do r[#r+1] = pool[i] end
+    return r
+  elseif pattern_name == "Up-Down" then
+    local r = {}
+    for _, n in ipairs(pool) do r[#r+1] = n end
+    for i = #pool-1, 2, -1 do r[#r+1] = pool[i] end
+    return r
+  elseif pattern_name == "Down-Up" then
+    local r = {}
+    for i = #pool, 1, -1 do r[#r+1] = pool[i] end
+    for i = 2, #pool-1 do r[#r+1] = pool[i] end
+    return r
+  elseif pattern_name == "Random" then
+    local r = {}
+    for _, n in ipairs(pool) do r[#r+1] = n end
+    for i = #r, 2, -1 do
+      local j = math.max(1, math.floor(rng_seq[i] * i) + 1)
+      r[i], r[j] = r[j], r[i]
+    end
+    return r
+  end
+  return pool
+end
+
+local BEAT_TOL = 0.001
+local function resolve_step_prob(abs_beat_pos)
+  local num        = state.timesig_num
+  local bar_phase  = abs_beat_pos % num
+  if bar_phase < BEAT_TOL or (num - bar_phase) < BEAT_TOL then
+    return state.arp_beat1_prob / 100.0
+  end
+  local grid_beats = ACCENT_GRID[state.arp_beatn_idx].beats
+  local grid_phase = abs_beat_pos % grid_beats
+  if grid_phase < BEAT_TOL or (grid_beats - grid_phase) < BEAT_TOL then
+    return state.arp_beatn_prob / 100.0
+  end
+  return state.arp_note_prob / 100.0
+end
+
+local function build_arp_events(chord_notes, chord_dur_beats, chord_abs_beat)
+  local rate_beats = ARP_RATES[state.arp_rate_idx].beats
+  local pattern    = ARP_PATTERNS[state.arp_pattern_idx]
+  local gate_frac  = state.arp_gate / 100.0
+  local base_vel   = state.arp_velocity
+  local human      = state.arp_vel_human
+  local pool = build_arp_pool(chord_notes, state.arp_octaves, state.arp_rigidity)
+  if #pool == 0 then return {} end
+  local n_steps = math.ceil(chord_dur_beats / rate_beats)
+  local rng_seq = {}
+  for i = 1, #pool + n_steps * 2 do rng_seq[i] = rng_float() end
+  local seq = apply_arp_pattern(pool, pattern, rng_seq)
+  if #seq == 0 then return {} end
+  local events = {}
+  if pattern == "Chord" then
+    local chord_voiced = {}
+    for oct = 0, state.arp_octaves - 1 do
+      for _, p in ipairs(chord_notes) do chord_voiced[#chord_voiced+1] = p + oct * 12 end
+    end
+    local pos      = 0
+    local step_idx = #chord_voiced + 1
+    while #rng_seq < step_idx + n_steps * 2 do rng_seq[#rng_seq+1] = rng_float() end
+    while pos < chord_dur_beats - 0.001 do
+      local actual_dur = math.min(rate_beats * gate_frac, chord_dur_beats - pos)
+      local prob = resolve_step_prob(chord_abs_beat + pos)
+      if rng_seq[step_idx] <= prob then
+        local vel_offset = math.floor((rng_seq[step_idx+1] * 2 - 1) * human)
+        local vel = math.max(1, math.min(127, base_vel + vel_offset))
+        for _, p in ipairs(chord_voiced) do
+          events[#events+1] = {pitch=p, pos=pos, dur=actual_dur, vel=vel}
+        end
+      end
+      pos = pos + rate_beats; step_idx = step_idx + 2
+    end
+  else
+    local pos = 0; local seq_pos = 1
+    local rng_offset = #pool + 1; local step_num = 0
+    while pos < chord_dur_beats - 0.001 do
+      local actual_dur   = math.min(rate_beats * gate_frac, chord_dur_beats - pos)
+      local rng_idx_prob = rng_offset + step_num * 2
+      local rng_idx_vel  = rng_idx_prob + 1
+      while #rng_seq < rng_idx_vel do rng_seq[#rng_seq+1] = rng_float() end
+      local prob = resolve_step_prob(chord_abs_beat + pos)
+      if rng_seq[rng_idx_prob] <= prob then
+        local vel_offset = math.floor((rng_seq[rng_idx_vel] * 2 - 1) * human)
+        local vel = math.max(1, math.min(127, base_vel + vel_offset))
+        events[#events+1] = {pitch=seq[seq_pos], pos=pos, dur=actual_dur, vel=vel}
+      end
+      pos = pos + rate_beats
+      seq_pos = (seq_pos % #seq) + 1
+      step_num = step_num + 1
+    end
+  end
+  return events
+end
+
+-- ----------------------------------------------------------------
+--  LIVE CHORD PREVIEW
+-- ----------------------------------------------------------------
+local function live_notes_off()
+  local ch = state.chord_channel
+  for _, n in ipairs(state.last_notes_on) do
+    reaper.StuffMIDIMessage(0, 0x80 | ch, n, 0)
+  end
+  state.last_notes_on = {}
+end
+
+local function live_notes_on(notes)
+  local ch = state.chord_channel
+  for _, n in ipairs(notes) do
+    reaper.StuffMIDIMessage(0, 0x90 | ch, n, 90)
+    state.last_notes_on[#state.last_notes_on+1] = n
+  end
+end
+
+local function live_preview_tick(progression)
+  local play_state = reaper.GetPlayState()
+  if play_state == 0 or play_state == 2 then
+    if #state.last_notes_on > 0 then live_notes_off() end
+    state.last_chord_idx = -1; state.chord_wait_boundary = false; return
+  end
+  local total_beats = 0
+  for _, ch in ipairs(progression) do total_beats = total_beats + ch.duration end
+  if total_beats == 0 then return end
+  local pos_beats = reaper.GetPlayPosition() * reaper.Master_GetTempo() / 60.0
+  local loop_pos  = pos_beats % total_beats
+  local chord_idx, acc = 1, 0
+  for i, ch in ipairs(progression) do
+    acc = acc + ch.duration
+    if loop_pos < acc then chord_idx = i; break end
+  end
+  if reaper.ImGui_IsAnyItemActive(ctx) then
+    if #state.last_notes_on > 0 then live_notes_off() end
+    state.chord_wait_boundary = true; state.last_chord_idx = chord_idx; return
+  end
+  if state.chord_wait_boundary then
+    if chord_idx == state.last_chord_idx then return end
+    state.chord_wait_boundary = false
+  end
+  if chord_idx == state.last_chord_idx then return end
+  live_notes_off()
+  live_notes_on(progression[chord_idx].notes)
+  state.last_chord_idx = chord_idx
+end
+
+-- ----------------------------------------------------------------
+--  LIVE ARP PREVIEW
+-- ----------------------------------------------------------------
+local function arp_live_note_off()
+  local ch = state.arp_channel
+  for _, n in ipairs(state.arp_live_notes_on) do
+    reaper.StuffMIDIMessage(0, 0x80 | ch, n, 0)
+  end
+  state.arp_live_notes_on = {}
+  state.arp_live_note_end = -1
+end
+
+local function arp_live_rebuild(progression)
+  rng_seed(state.seed)
+  local events = {}
+  local pos_beats = 0
+  local cursor_abs = reaper.GetCursorPosition() * reaper.Master_GetTempo() / 60.0
+  for _, ch in ipairs(progression) do
+    local arp_evs = build_arp_events(ch.notes, ch.duration, cursor_abs + pos_beats)
+    for _, ev in ipairs(arp_evs) do
+      events[#events+1] = {pitch=ev.pitch, pos=pos_beats+ev.pos, dur=ev.dur, vel=ev.vel}
+    end
+    pos_beats = pos_beats + ch.duration
+  end
+  state.arp_live_events      = events
+  state.arp_live_total_beats = pos_beats
+  state.arp_live_last_idx    = -1
+  arp_live_note_off()
+end
+
+local function arp_live_tick(progression)
+  local play_state = reaper.GetPlayState()
+  if play_state == 0 or play_state == 2 then
+    arp_live_note_off(); state.arp_live_last_idx=-1; state.arp_wait_boundary=false; return
+  end
+  if not state.arp_live_events then
+    arp_live_rebuild(progression)
+    state.arp_live_last_idx = -1; state.arp_wait_boundary = true
+  end
+  local events      = state.arp_live_events
+  local total_beats = state.arp_live_total_beats
+  if not events or #events == 0 or total_beats == 0 then return end
+  local pos_beats  = reaper.GetPlayPosition() * reaper.Master_GetTempo() / 60.0
+  local loop_beats = pos_beats % total_beats
+  local cur_idx = -1
+  for i, ev in ipairs(events) do
+    if ev.pos <= loop_beats then cur_idx = i else break end
+  end
+  if reaper.ImGui_IsAnyItemActive(ctx) then
+    arp_live_note_off(); state.arp_wait_boundary=true; state.arp_live_last_idx=cur_idx; return
+  end
+  if state.arp_wait_boundary then
+    if cur_idx == state.arp_live_last_idx then return end
+    state.arp_wait_boundary = false
+    state.arp_live_last_idx = cur_idx - 1
+  end
+  if cur_idx < 1 then
+    arp_live_note_off(); state.arp_live_last_idx=-1; return
+  end
+  if cur_idx ~= state.arp_live_last_idx then
+    arp_live_note_off()
+    local cur_pos = events[cur_idx].pos
+    local cur_end = cur_pos + events[cur_idx].dur
+    local ch      = state.arp_channel
+    if loop_beats < cur_end then
+      local first = cur_idx
+      while first > 1 and events[first-1].pos == cur_pos do first = first - 1 end
+      local i = first
+      while i <= #events and events[i].pos == cur_pos do
+        reaper.StuffMIDIMessage(0, 0x90 | ch, events[i].pitch, events[i].vel)
+        state.arp_live_notes_on[#state.arp_live_notes_on+1] = events[i].pitch
+        i = i + 1
+      end
+      state.arp_live_note_end = cur_end
+    end
+    state.arp_live_last_idx = cur_idx
+  else
+    if #state.arp_live_notes_on > 0 and loop_beats >= state.arp_live_note_end then
+      arp_live_note_off()
+    end
+  end
+end
+
+-- ----------------------------------------------------------------
+--  LIVE MELODY PREVIEW
+-- ----------------------------------------------------------------
+local function mel_live_note_off()
+  if state.mel_live_note >= 0 then
+    reaper.StuffMIDIMessage(0, 0x80 | state.mel_channel, state.mel_live_note, 0)
+    state.mel_live_note     = -1
+    state.mel_live_note_end = -1
+  end
+end
+
+local function mel_live_rebuild(progression)
+  rng_seed(state.seed)
+  -- Consume arp RNG stream first (same order as write_all) so melody is consistent
+  local cursor_abs = reaper.GetCursorPosition() * reaper.Master_GetTempo() / 60.0
+  local pos = 0
+  for _, ch in ipairs(progression) do
+    build_arp_events(ch.notes, ch.duration, cursor_abs + pos)
+    pos = pos + ch.duration
+  end
+  -- Now generate melody (RNG stream continues from here)
+  local events, total = build_melody_events(progression)
+  state.mel_live_events      = events
+  state.mel_live_total_beats = total
+  state.mel_live_last_idx    = -1
+  mel_live_note_off()
+end
+
+local function mel_live_tick(progression)
+  local play_state = reaper.GetPlayState()
+  if play_state == 0 or play_state == 2 then
+    mel_live_note_off(); state.mel_live_last_idx=-1; state.mel_wait_boundary=false; return
+  end
+  if not state.mel_live_events then
+    mel_live_rebuild(progression)
+    state.mel_live_last_idx = -1; state.mel_wait_boundary = true
+  end
+  local events      = state.mel_live_events
+  local total_beats = state.mel_live_total_beats
+  if not events or #events == 0 or total_beats == 0 then return end
+  local pos_beats  = reaper.GetPlayPosition() * reaper.Master_GetTempo() / 60.0
+  local loop_beats = pos_beats % total_beats
+  local cur_idx = -1
+  for i, ev in ipairs(events) do
+    if ev.pos <= loop_beats then cur_idx = i else break end
+  end
+  if reaper.ImGui_IsAnyItemActive(ctx) then
+    mel_live_note_off(); state.mel_wait_boundary=true; state.mel_live_last_idx=cur_idx; return
+  end
+  if state.mel_wait_boundary then
+    if cur_idx == state.mel_live_last_idx then return end
+    state.mel_wait_boundary = false
+    state.mel_live_last_idx = cur_idx - 1
+  end
+  if cur_idx < 1 then
+    mel_live_note_off(); state.mel_live_last_idx=-1; return
+  end
+  if cur_idx ~= state.mel_live_last_idx then
+    mel_live_note_off()
+    local ev = events[cur_idx]
+    if loop_beats < ev.pos + ev.dur then
+      reaper.StuffMIDIMessage(0, 0x90 | state.mel_channel, ev.pitch, ev.vel)
+      state.mel_live_note     = ev.pitch
+      state.mel_live_note_end = ev.pos + ev.dur
+    end
+    state.mel_live_last_idx = cur_idx
+  else
+    if state.mel_live_note >= 0 and loop_beats >= state.mel_live_note_end then
+      mel_live_note_off()
+    end
+  end
+end
+
+-- ----------------------------------------------------------------
+--  RESET LIVE  (all layers)
+-- ----------------------------------------------------------------
+local function reset_live()
+  live_notes_off()
+  state.last_chord_idx      = -1
+  state.chord_wait_boundary = true
+  state.arp_live_events     = nil
+  state.arp_wait_boundary   = true
+  arp_live_note_off()
+  state.mel_live_events     = nil
+  state.mel_wait_boundary   = true
+  mel_live_note_off()
+end
+
+-- ----------------------------------------------------------------
+--  MIDI ITEM WRITER
+-- ----------------------------------------------------------------
+local function get_or_create_track(name)
+  for i = 0, reaper.CountTracks(0)-1 do
+    local tr = reaper.GetTrack(0, i)
+    local _, tn = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
+    if tn == name then return tr end
+  end
+  reaper.InsertTrackAtIndex(reaper.CountTracks(0), true)
+  local tr = reaper.GetTrack(0, reaper.CountTracks(0)-1)
+  reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", name, true)
+  return tr
+end
+
+local function write_midi_item(track, item_start, item_len, note_events, ppq)
+  local item = reaper.CreateNewMIDIItemInProj(track, item_start, item_start+item_len, false)
+  if not item then return nil, "could not create MIDI item" end
+  local take = reaper.GetActiveTake(item)
+  if not take then return nil, "could not get active take" end
+  reaper.SetMediaItemTakeInfo_Value(take, "D_STARTOFFS", 0)
+  for _, ev in ipairs(note_events) do
+    reaper.MIDI_InsertNote(take, false, false,
+      ev.pos * ppq, (ev.pos + ev.dur) * ppq - 2,
+      ev.channel or 0, ev.pitch, ev.vel or 90, false)
+  end
+  reaper.MIDI_Sort(take)
+  reaper.UpdateItemInProject(item)
+  return item, nil
+end
+
+-- ----------------------------------------------------------------
+--  WRITE ALL LAYERS
+-- ----------------------------------------------------------------
+local function write_all()
+  reaper.Undo_BeginBlock()
+  rng_seed(state.seed)
+
+  local progression = build_progression()
+  if #progression == 0 then
+    state.status_msg = "Error: empty progression."
+    reaper.Undo_EndBlock("Chord Generator: write (empty)", -1)
+    return
+  end
+
+  local total_beats = 0
+  for _, ch in ipairs(progression) do total_beats = total_beats + ch.duration end
+
+  local ppq        = state.ppq_per_beat
+  local tempo      = reaper.Master_GetTempo()
+  local item_start = reaper.GetCursorPosition()
+  local item_len   = total_beats * 60.0 / tempo
+  local cursor_abs = item_start * tempo / 60.0
+  local written    = {}
+
+  -- Chord layer
+  if state.chord_enabled then
+    local track  = get_or_create_track(state.chord_track_name)
+    local events = {}
+    local pos    = 0
+    for _, ch in ipairs(progression) do
+      for _, note in ipairs(ch.notes) do
+        events[#events+1] = {
+          pitch=note, pos=pos, dur=ch.duration-(1/ppq),
+          vel=state.chord_velocity, channel=state.chord_channel,
+        }
+      end
+      pos = pos + ch.duration
+    end
+    local _, err = write_midi_item(track, item_start, item_len, events, ppq)
+    if err then
+      state.status_msg="Chord write error: "..err
+      reaper.Undo_EndBlock("Chord Generator: write (failed)", -1); return
+    end
+    written[#written+1] = state.chord_track_name
+  end
+
+  -- Arp layer
+  if state.arp_enabled then
+    local track  = get_or_create_track(state.arp_track_name)
+    local events = {}
+    local pos    = 0
+    for _, ch in ipairs(progression) do
+      local arp_evs = build_arp_events(ch.notes, ch.duration, cursor_abs + pos)
+      for _, ev in ipairs(arp_evs) do
+        events[#events+1] = {
+          pitch=ev.pitch, pos=pos+ev.pos, dur=ev.dur,
+          vel=ev.vel, channel=state.arp_channel,
+        }
+      end
+      pos = pos + ch.duration
+    end
+    local _, err = write_midi_item(track, item_start, item_len, events, ppq)
+    if err then
+      state.status_msg="Arp write error: "..err
+      reaper.Undo_EndBlock("Chord Generator: write (failed)", -1); return
+    end
+    written[#written+1] = state.arp_track_name
+  end
+
+  -- Melody layer
+  if state.mel_enabled then
+    local track = get_or_create_track(state.mel_track_name)
+    local mel_evs, _ = build_melody_events(progression)
+    local events = {}
+    for _, ev in ipairs(mel_evs) do
+      events[#events+1] = {
+        pitch=ev.pitch, pos=ev.pos, dur=ev.dur,
+        vel=ev.vel, channel=state.mel_channel,
+      }
+    end
+    local _, err = write_midi_item(track, item_start, item_len, events, ppq)
+    if err then
+      state.status_msg="Melody write error: "..err
+      reaper.Undo_EndBlock("Chord Generator: write (failed)", -1); return
+    end
+    written[#written+1] = state.mel_track_name
+  end
+
+  local total_bars = 0
+  for _, ch in ipairs(progression) do total_bars = total_bars + ch.dur_bars end
+  reaper.UpdateArrange()
+  reaper.Undo_EndBlock("Chord Generator: write all layers", -1)
+  state.status_msg = string.format(
+    "Written to [%s]  |  seed %d  |  %d bars (%d/%d) @ cursor.",
+    table.concat(written, ", "), state.seed,
+    total_bars, state.timesig_num, state.timesig_denom
+  )
+end
+
+-- ----------------------------------------------------------------
+--  SEED HELPERS
+-- ----------------------------------------------------------------
+local function randomise_seed()
+  if state.seed_locked then return end
+  state.seed     = math.floor(reaper.time_precise() * 100000) % 99999
+  state.seed_str = tostring(state.seed)
+  rng_seed(state.seed)
+  reset_live()
+  state.arp_live_events = nil
+  state.mel_live_events = nil
+end
+
+local function apply_seed_str()
+  local n = tonumber(state.seed_str)
+  if n and n >= 0 then
+    state.seed     = math.floor(n) % 99999
+    state.seed_str = tostring(state.seed)
+    rng_seed(state.seed)
+    reset_live()
+    state.arp_live_events = nil
+    state.mel_live_events = nil
+  end
+end
+
+-- ----------------------------------------------------------------
+--  UI HELPERS
+-- ----------------------------------------------------------------
+local function combo(label, items, current_idx)
+  local preview = items[current_idx] or "?"
+  local changed, new_idx = false, current_idx
+  if reaper.ImGui_BeginCombo(ctx, label, preview) then
+    for i, v in ipairs(items) do
+      local sel = (i == current_idx)
+      if reaper.ImGui_Selectable(ctx, v, sel) then new_idx, changed = i, true end
+      if sel then reaper.ImGui_SetItemDefaultFocus(ctx) end
+    end
+    reaper.ImGui_EndCombo(ctx)
+  end
+  return changed, new_idx
+end
+
+-- Grouped combo: items is a list of {label, group} or plain strings.
+-- Renders non-selectable separator rows between groups.
+-- Returns changed, new_idx (1-based index into selectable items only).
+--
+-- items format: { {label="name", group="GroupName"}, ... }
+-- A new group header is drawn whenever group changes.
+-- current_idx and returned idx count only selectable items.
+local function combo_grouped(label, items, current_idx)
+  local preview = (items[current_idx] and items[current_idx].label) or "?"
+  local changed, new_idx = false, current_idx
+  if reaper.ImGui_BeginCombo(ctx, label, preview) then
+    local last_group = nil
+    for i, item in ipairs(items) do
+      -- Draw group separator header if group changed
+      if item.group and item.group ~= last_group then
+        if last_group then
+          reaper.ImGui_Separator(ctx)
+        end
+        -- Non-selectable, styled header
+        reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_Text(), 0xFFAA44FF)
+        reaper.ImGui_Text(ctx, "  "..item.group)
+        reaper.ImGui_PopStyleColor(ctx)
+        last_group = item.group
+      end
+      local sel = (i == current_idx)
+      if reaper.ImGui_Selectable(ctx, "  "..item.label, sel) then
+        new_idx, changed = i, true
+      end
+      if sel then reaper.ImGui_SetItemDefaultFocus(ctx) end
+    end
+    reaper.ImGui_EndCombo(ctx)
+  end
+  return changed, new_idx
+end
+
+local function sslider(label, val, lo, hi, w)
+  reaper.ImGui_SetNextItemWidth(ctx, w or 80)
+  return reaper.ImGui_SliderInt(ctx, label, val, lo, hi)
+end
+
+-- ----------------------------------------------------------------
+--  GROUPED COMBO ITEM TABLES
+--  Built once; used by combo_grouped() in draw_ui.
+-- ----------------------------------------------------------------
+
+-- Mode items grouped into Bright / Dark
+local MODE_ITEMS = {
+  {label="Major",          group="Bright"},
+  {label="Lydian",         group="Bright"},
+  {label="Lydian Dom",     group="Bright"},
+  {label="Mixolydian",     group="Bright"},
+  {label="Minor (nat.)",   group="Dark"},
+  {label="Dorian",         group="Dark"},
+  {label="Phrygian",       group="Dark"},
+  {label="Locrian",        group="Dark"},
+  {label="Harmonic Minor", group="Dark"},
+}
+
+-- Progression items built from PROGRESSIONS table (uses existing cat field)
+local PROG_ITEMS = {}
+for _, p in ipairs(PROGRESSIONS) do
+  PROG_ITEMS[#PROG_ITEMS+1] = {label=p.name, group=p.cat or "Other"}
+end
+
+-- Melody preset items grouped
+local MEL_PRESET_ITEMS = {
+  {label="Free",            group="Organic"},
+  {label="Flowing",         group="Organic"},
+  {label="Structured",      group="Organic"},
+  {label="Conversational",  group="Organic"},
+  {label="Mechanical",      group="Rule-based"},
+  {label="Phrase & Answer", group="Compositional"},
+  {label="Fractal",         group="Compositional"},
+  {label="Motif",           group="Compositional"},
+}
+
+-- Chord quality items grouped
+local QUALITY_ITEMS = {
+  {label="auto (mode)",  group="Default"},
+  {label="maj",          group="Triads"},
+  {label="min",          group="Triads"},
+  {label="dim",          group="Triads"},
+  {label="aug",          group="Triads"},
+  {label="sus2",         group="Suspended"},
+  {label="sus4",         group="Suspended"},
+  {label="maj7",         group="Seventh"},
+  {label="min7",         group="Seventh"},
+  {label="dom7",         group="Seventh"},
+  {label="dim7",         group="Seventh"},
+  {label="add9",         group="Extended"},
+  {label="maj9",         group="Extended"},
+  {label="min9",         group="Extended"},
+}
+-- Internal quality values parallel to QUALITY_ITEMS
+local QUALITY_ITEM_VALUES = {
+  "auto","maj","min","dim","aug",
+  "sus2","sus4",
+  "maj7","min7","dom7","dim7",
+  "add9","maj9","min9",
+}
+
+-- ----------------------------------------------------------------
+--  DRAW UI
+-- ----------------------------------------------------------------
+local function draw_ui()
+  local progression = build_progression()
+
+  if reaper.GetPlayState() == 1 then
+    state.timesig_num, state.timesig_denom = get_timesig_at_playpos()
+  else
+    state.timesig_num, state.timesig_denom = get_timesig_at_cursor()
+  end
+
+  -- ── Key / Mode ──────────────────────────────────────────────
+  reaper.ImGui_SeparatorText(ctx, string.format("Key & Mode          [ %d/%d ]",
+    state.timesig_num, state.timesig_denom))
+  reaper.ImGui_SetNextItemWidth(ctx, 80)
+  local ch, ni = combo("Root##root", NOTE_NAMES, state.root_idx)
+  if ch then state.root_idx = ni; reset_live() end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 155)
+  local cm, mi = combo_grouped("Mode##mode", MODE_ITEMS, state.mode_idx)
+  if cm then state.mode_idx = mi; reset_live() end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 80)
+  local co, ov = reaper.ImGui_SliderInt(ctx, "Octave##oct", state.octave, 2, 6)
+  if co then state.octave = ov; reset_live() end
+
+  -- ── Progression ──────────────────────────────────────────────
+  reaper.ImGui_SeparatorText(ctx, "Progression")
+
+  reaper.ImGui_SetNextItemWidth(ctx, 280)
+  local cp, pi = combo_grouped("Preset##prog", PROG_ITEMS, state.prog_idx)
+  if cp then
+    state.prog_idx = pi
+    local p = PROGRESSIONS[pi]
+    local n = (p.name=="Custom") and #state.custom_degrees or #p.degrees
+    init_chord_arrays(n)
+    load_preset_qualities(p, n)
+    reset_live()
+  end
+
+  if PROGRESSIONS[state.prog_idx].name == "Custom" then
+    reaper.ImGui_Text(ctx, "Degrees (1-7):")
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_SetNextItemWidth(ctx, 200)
+    local deg_str = table.concat(state.custom_degrees, " ")
+    local ce, ns  = reaper.ImGui_InputText(ctx, "##cust", deg_str)
+    if ce then
+      local nd = {}
+      for d in ns:gmatch("%d") do
+        local di = tonumber(d)
+        if di and di>=1 and di<=7 then nd[#nd+1]=di end
+      end
+      if #nd>0 then state.custom_degrees=nd; init_chord_arrays(#nd); reset_live() end
+    end
+  end
+
+  -- ── Chord Settings ───────────────────────────────────────────
+  reaper.ImGui_SeparatorText(ctx, "Chord Settings")
+  local degrees   = current_degrees()
+  local mode      = MODE_NAMES[state.mode_idx]
+  local qualities = MODE_CHORDS[mode]
+
+  -- Column header
+  reaper.ImGui_TextDisabled(ctx,
+    string.format("%-18s %-8s %-6s %-10s %-6s", "Chord", "Quality", "Bars", "Inversion", ""))
+  reaper.ImGui_Separator(ctx)
+
+  for i, deg in ipairs(degrees) do
+    local mode_quality = qualities[deg] or "maj"
+    local override     = state.chord_quality_overrides[i]
+    local quality      = override or mode_quality
+    local root_m       = degree_root_midi(state.root_idx, mode, deg, state.octave)
+    local root_name    = NOTE_NAMES[(root_m%12)+1]
+
+    -- Chord root name
+    reaper.ImGui_Text(ctx, string.format("%d. %-6s", i, root_name))
+    reaper.ImGui_SameLine(ctx)
+
+    -- Quality combo — highlighted if overridden
+    if override then
+      reaper.ImGui_PushStyleColor(ctx, reaper.ImGui_Col_FrameBg(), 0x2244AAFF)
+    end
+    reaper.ImGui_SetNextItemWidth(ctx, 100)
+    local cur_q_idx = 1  -- default = "auto"
+    for qi, qv in ipairs(QUALITY_ITEM_VALUES) do
+      if qv == (override or "auto") then cur_q_idx = qi; break end
+    end
+    local qc, qv = combo_grouped("##q"..i, QUALITY_ITEMS, cur_q_idx)
+    if qc then
+      local chosen = QUALITY_ITEM_VALUES[qv]
+      state.chord_quality_overrides[i] = (chosen == "auto") and nil or chosen
+      reset_live()
+    end
+    if override then reaper.ImGui_PopStyleColor(ctx) end
+
+    reaper.ImGui_SameLine(ctx)
+
+    -- Duration slider
+    local cd, dv = sslider("##dur"..i, state.chord_durations[i] or 1, 1, 8, 55)
+    if cd then state.chord_durations[i]=dv; reset_live() end
+    reaper.ImGui_SameLine(ctx); reaper.ImGui_TextDisabled(ctx, "bars")
+    reaper.ImGui_SameLine(ctx)
+
+    -- Inversion slider
+    local max_inv = math.min(3, #(CHORD_INTERVALS[quality] or {0})-1)
+    local ci2, iv = sslider("inv##inv"..i, state.chord_inversions[i] or 0, 0, max_inv, 65)
+    if ci2 then state.chord_inversions[i]=iv; reset_live() end
+
+    -- Override indicator
+    if override then
+      reaper.ImGui_SameLine(ctx)
+      reaper.ImGui_TextDisabled(ctx, "* overriding "..mode_quality)
+    end
+  end
+
+  -- Reset all overrides button
+  local any_override = false
+  for _, q in ipairs(state.chord_quality_overrides) do
+    if q then any_override = true; break end
+  end
+  if any_override then
+    if reaper.ImGui_SmallButton(ctx, "Reset all quality overrides") then
+      for i = 1, #state.chord_quality_overrides do
+        state.chord_quality_overrides[i] = nil
+      end
+      reset_live()
+    end
+  end
+
+  local parts = {}; local total_bars = 0
+  for _, c in ipairs(progression) do
+    local lbl = c.label
+    parts[#parts+1] = lbl.." ("..c.dur_bars..")"
+    total_bars = total_bars + c.dur_bars
+  end
+  reaper.ImGui_TextDisabled(ctx,
+    table.concat(parts, "  ->  ").."   ["..total_bars.." bars]"
+    ..(any_override and "  (* = quality override)" or "")
+  )
+
+  -- ── Chord Layer ──────────────────────────────────────────────
+  reaper.ImGui_SeparatorText(ctx, "Chord Layer")
+  local lcc, lcv = reaper.ImGui_Checkbox(ctx, "Enabled##chenabled", state.chord_enabled)
+  if lcc then state.chord_enabled = lcv end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 120)
+  local _, ctn = reaper.ImGui_InputText(ctx, "Track##ctrk", state.chord_track_name)
+  state.chord_track_name = ctn
+  reaper.ImGui_SameLine(ctx)
+  local cchc, cchv = sslider("Ch##cch", state.chord_channel+1, 1, 16, 55)
+  if cchc then state.chord_channel = cchv-1 end
+  reaper.ImGui_SameLine(ctx)
+  local cvc, cvv = sslider("Vel##cvel", state.chord_velocity, 1, 127, 65)
+  if cvc then state.chord_velocity = cvv end
+
+  -- ── Arp Layer ────────────────────────────────────────────────
+  reaper.ImGui_SeparatorText(ctx, "Arp Layer")
+  local lac, lav = reaper.ImGui_Checkbox(ctx, "Enabled##arp", state.arp_enabled)
+  if lac then state.arp_enabled = lav end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 120)
+  local _, atn = reaper.ImGui_InputText(ctx, "Track##atrk", state.arp_track_name)
+  state.arp_track_name = atn
+  reaper.ImGui_SameLine(ctx)
+  local achc, achv = sslider("Ch##ach", state.arp_channel+1, 1, 16, 55)
+  if achc then state.arp_channel = achv-1 end
+
+  reaper.ImGui_SetNextItemWidth(ctx, 110)
+  local apc, apv = combo("Pattern##apatt", ARP_PATTERNS, state.arp_pattern_idx)
+  if apc then state.arp_pattern_idx = apv; state.arp_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 90)
+  local arc, arv = combo("Rate##arate", ARP_RATE_NAMES, state.arp_rate_idx)
+  if arc then state.arp_rate_idx = arv; state.arp_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  local aocc, aocv = sslider("Octaves##aoct", state.arp_octaves, 1, 4, 75)
+  if aocc then state.arp_octaves = aocv; state.arp_live_events = nil end
+
+  local agc, agv = sslider("Gate%%##gate", state.arp_gate, 5, 100, 75)
+  if agc then state.arp_gate = agv; state.arp_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  local avc, avv = sslider("Vel##avel", state.arp_velocity, 1, 127, 65)
+  if avc then state.arp_velocity = avv; state.arp_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  local ahc, ahv = sslider("+/-##human", state.arp_vel_human, 0, 40, 55)
+  if ahc then state.arp_vel_human = ahv; state.arp_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  local anpc, anpv = sslider("Prob%%##prob", state.arp_note_prob, 0, 100, 65)
+  if anpc then state.arp_note_prob = anpv; state.arp_live_events = nil end
+
+  local arc2, arv2 = sslider("Rigidity##rigid", state.arp_rigidity, 0, 100, 220)
+  if arc2 then state.arp_rigidity = arv2; state.arp_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  local rlabels = {"chord tones only","mostly chord, hint of scale","chord-leaning blend",
+                   "scale-leaning blend","mostly scale, anchored by chord",
+                   "full scale (key/"..MODE_DISPLAY[state.mode_idx]..")"}
+  local ri = state.arp_rigidity == 0 and 1 or state.arp_rigidity < 25 and 2
+    or state.arp_rigidity < 50 and 3 or state.arp_rigidity < 75 and 4
+    or state.arp_rigidity < 100 and 5 or 6
+  reaper.ImGui_TextDisabled(ctx, rlabels[ri])
+
+  local ab1c, ab1v = sslider("Beat 1 Prob%%##b1p", state.arp_beat1_prob, 0, 100, 110)
+  if ab1c then state.arp_beat1_prob = ab1v; state.arp_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 75)
+  local agrc, agrv = combo("##accentgrid", ACCENT_GRID_NAMES, state.arp_beatn_idx)
+  if agrc then state.arp_beatn_idx = agrv; state.arp_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  local abnc, abnv = sslider("Prob%%##bnp", state.arp_beatn_prob, 0, 100, 90)
+  if abnc then state.arp_beatn_prob = abnv; state.arp_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextDisabled(ctx, "  global: "..state.arp_note_prob.."%")
+
+  -- ── Melody Layer ─────────────────────────────────────────────
+  reaper.ImGui_SeparatorText(ctx, "Melody Layer")
+
+  local mlc, mlv = reaper.ImGui_Checkbox(ctx, "Enabled##melenabled", state.mel_enabled)
+  if mlc then state.mel_enabled = mlv end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 120)
+  local _, mtn = reaper.ImGui_InputText(ctx, "Track##mtrk", state.mel_track_name)
+  state.mel_track_name = mtn
+  reaper.ImGui_SameLine(ctx)
+  local mchc, mchv = sslider("Ch##mch", state.mel_channel+1, 1, 16, 55)
+  if mchc then state.mel_channel = mchv-1; state.mel_live_events=nil end
+
+  -- Preset
+  reaper.ImGui_SetNextItemWidth(ctx, 170)
+  local mpc, mpv = combo_grouped("Preset##melpre", MEL_PRESET_ITEMS, state.mel_preset_idx)
+  if mpc then state.mel_preset_idx = mpv; state.mel_live_events=nil end
+  reaper.ImGui_SameLine(ctx)
+  local mrestc, mrestv = sslider("Rest%%##mrest", state.mel_rest_prob, 0, 60, 70)
+  if mrestc then state.mel_rest_prob = mrestv; state.mel_live_events=nil end
+  reaper.ImGui_SameLine(ctx)
+  local mvc, mvv = sslider("Vel##mvel", state.mel_velocity, 1, 127, 65)
+  if mvc then state.mel_velocity = mvv; state.mel_live_events=nil end
+  reaper.ImGui_SameLine(ctx)
+  local mhc, mhv = sslider("+/-##mhuman", state.mel_vel_human, 0, 40, 55)
+  if mhc then state.mel_vel_human = mhv; state.mel_live_events=nil end
+
+  -- Duration range
+  reaper.ImGui_SetNextItemWidth(ctx, 75)
+  local mmnic, mmniv = combo("Min##mmin", MEL_DUR_NAMES, state.mel_min_dur_idx)
+  if mmnic then
+    state.mel_min_dur_idx = math.min(mmniv, state.mel_max_dur_idx)
+    state.mel_live_events = nil
+  end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 75)
+  local mmxc, mmxv = combo("Max##mmax", MEL_DUR_NAMES, state.mel_max_dur_idx)
+  if mmxc then
+    state.mel_max_dur_idx = math.max(mmxv, state.mel_min_dur_idx)
+    state.mel_live_events = nil
+  end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextDisabled(ctx, "note duration range  ("
+    ..MEL_DUR_NAMES[state.mel_min_dur_idx].." – "..MEL_DUR_NAMES[state.mel_max_dur_idx]..")")
+
+  -- Octave range
+  local mominc, ominv = sslider("Oct Min##momin", state.mel_oct_min, 2, 7, 80)
+  if mominc then
+    state.mel_oct_min = math.min(ominv, state.mel_oct_max)
+    state.mel_live_events = nil
+  end
+  reaper.ImGui_SameLine(ctx)
+  local momaxc, omaxv = sslider("Oct Max##momax", state.mel_oct_max, 2, 7, 80)
+  if momaxc then
+    state.mel_oct_max = math.max(omaxv, state.mel_oct_min)
+    state.mel_live_events = nil
+  end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextDisabled(ctx, "octave range")
+
+  -- Rigidity + Colour + Metre
+  local mrigc, mrigv = sslider("Rigidity##mrig", state.mel_rigidity, 0, 100, 130)
+  if mrigc then state.mel_rigidity = mrigv; state.mel_live_events=nil end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextDisabled(ctx, state.mel_rigidity==0 and "chord tones only"
+    or state.mel_rigidity < 50 and "chord-weighted" or "scale-free")
+  reaper.ImGui_SameLine(ctx)
+  local mcolc, mcolv = sslider("Colour##mcol", state.mel_colour, 0, 100, 100)
+  if mcolc then state.mel_colour = mcolv; state.mel_live_events=nil end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextDisabled(ctx, state.mel_colour==0 and "no chromatic"
+    or state.mel_colour < 40 and "hint of colour"
+    or state.mel_colour < 75 and "passing tones"
+    or "chromatic")
+
+  local mmetc, mmetv = sslider("Metre##mmet", state.mel_metre, 0, 100, 130)
+  if mmetc then state.mel_metre = mmetv; state.mel_live_events=nil end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextDisabled(ctx,
+    state.mel_metre == 0  and "free — any onset, any length" or
+    state.mel_metre < 25  and "loose — slight beat preference" or
+    state.mel_metre < 50  and "moderate — favours beats" or
+    state.mel_metre < 75  and "strong — snaps to beat grid" or
+    state.mel_metre < 90  and "strict — downbeat-driven" or
+    "locked — beat grid only")
+
+  -- ── Live Preview ─────────────────────────────────────────────
+  reaper.ImGui_SeparatorText(ctx, "Live Preview")
+
+  local lec, lev = reaper.ImGui_Checkbox(ctx, "Chords##livecheck", state.live_enabled)
+  if lec then
+    state.live_enabled = lev
+    if not lev then live_notes_off(); state.last_chord_idx=-1 end
+  end
+  if state.live_enabled then
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_TextDisabled(ctx, "Chord Ch")
+    live_preview_tick(progression)
+  end
+
+  local alec, alev = reaper.ImGui_Checkbox(ctx, "Arp##arplivecheck", state.arp_live_enabled)
+  if alec then
+    state.arp_live_enabled = alev
+    if not alev then arp_live_note_off(); state.arp_live_last_idx=-1 end
+  end
+  if state.arp_live_enabled then
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_TextDisabled(ctx, "Arp Ch")
+    arp_live_tick(progression)
+  end
+
+  local mlec, mlev = reaper.ImGui_Checkbox(ctx, "Melody##mellivecheck", state.mel_live_enabled)
+  if mlec then
+    state.mel_live_enabled = mlev
+    if not mlev then mel_live_note_off(); state.mel_live_last_idx=-1 end
+  end
+  if state.mel_live_enabled then
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_TextDisabled(ctx, "Melody Ch")
+    mel_live_tick(progression)
+  end
+
+  if state.live_enabled or state.arp_live_enabled or state.mel_live_enabled then
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_TextDisabled(ctx, "  Press Play to hear")
+  end
+
+  -- ── Seed & Keep ──────────────────────────────────────────────
+  reaper.ImGui_SeparatorText(ctx, "Seed & Keep")
+  reaper.ImGui_SetNextItemWidth(ctx, 100)
+  local sec, sev = reaper.ImGui_InputText(ctx, "##seed", state.seed_str)
+  if sec then state.seed_str = sev; apply_seed_str() end
+  reaper.ImGui_SameLine(ctx)
+  local slc, slv = reaper.ImGui_Checkbox(ctx, "Lock##seedlock", state.seed_locked)
+  if slc then state.seed_locked = slv end
+  reaper.ImGui_SameLine(ctx)
+  if state.seed_locked then reaper.ImGui_BeginDisabled(ctx) end
+  if reaper.ImGui_Button(ctx, "Randomise##randseed", 90, 0) then randomise_seed() end
+  if state.seed_locked then reaper.ImGui_EndDisabled(ctx) end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextDisabled(ctx, string.format("seed: %d", state.seed))
+
+  reaper.ImGui_Spacing(ctx)
+  if reaper.ImGui_Button(ctx, "Write to Tracks  (at edit cursor)", 240, 28) then
+    write_all()
+  end
+  reaper.ImGui_SameLine(ctx)
+  if reaper.ImGui_Button(ctx, "  KEEP this take  ", 160, 28) then
+    state.seed_locked = true
+    write_all()
+    state.status_msg = "[KEPT]  "..state.status_msg
+  end
+
+  reaper.ImGui_Spacing(ctx)
+  reaper.ImGui_Separator(ctx)
+  reaper.ImGui_TextDisabled(ctx, state.status_msg)
+end
+
+-- ----------------------------------------------------------------
+--  KEYBOARD PASSTHROUGH
+-- ----------------------------------------------------------------
+local function get_key(name)
+  local fn = reaper["ImGui_Key_"..name]
+  return fn and fn() or nil
+end
+local KEY_SPACE = get_key("Space") or 32
+local KEY_HOME  = get_key("Home")  or 268
+local KEY_END   = get_key("End")   or 269
+
+local function handle_keys()
+  if reaper.ImGui_IsAnyItemActive(ctx) then return end
+  local function pressed(k)
+    return k and reaper.ImGui_IsKeyPressed(ctx, k, false)
+  end
+  if pressed(KEY_SPACE) then reaper.Main_OnCommand(40044, 0) end
+  if pressed(KEY_HOME)  then reaper.Main_OnCommand(40042, 0) end
+  if pressed(KEY_END)   then reaper.Main_OnCommand(40043, 0) end
+end
+
+-- ----------------------------------------------------------------
+--  MAIN LOOP
+-- ----------------------------------------------------------------
+local function loop()
+  reaper.ImGui_SetNextWindowSize(ctx, 600, 920, reaper.ImGui_Cond_FirstUseEver())
+  local visible, open = reaper.ImGui_Begin(ctx, "Chord Generator  –  Phase 3", true)
+  if visible then
+    local ok, err = pcall(draw_ui)
+    if not ok then
+      reaper.ImGui_TextColored(ctx, 0xFF4444FF, "Error: "..tostring(err))
+    end
+    handle_keys()
+    reaper.ImGui_End(ctx)
+  end
+  if not open then
+    live_notes_off(); arp_live_note_off(); mel_live_note_off()
+  end
+  if open then reaper.defer(loop) end
+end
+
+reaper.defer(loop)
