@@ -9,7 +9,7 @@ A REAPER script (Lua) for generating chord progressions, arpeggios, and melodies
 - **Arpeggiator** with patterns (Up, Down, Up-Down, Down-Up, Random, Chord), selectable rates (1/4 – 1/32, including 1/16T), octave range, step probability, and rigidity.
 - **Melody generator** with 8 generation presets:
   - Free, Flowing, Structured, Conversational, Mechanical, Phrase & Answer, Fractal, Motif
-  - Controls for rigidity, chromatic colour (passing tones), min/max note duration, and metric beat-placement weighting.
+  - Controls for rigidity, chromatic colour (passing tones), min/max note duration, metric beat-placement weighting, and a busyness slider that drives note density along an arc — high values cluster shorter notes around bar/half-bar landmarks.
 - **Live preview** of chords, arpeggios, and melody while editing parameters.
 - **Deterministic seeds** for reproducible generation, plus a randomise button.
 - Writes results as MIDI items on dedicated tracks, respecting the project's time signature at the cursor.
