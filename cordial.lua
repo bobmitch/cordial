@@ -514,11 +514,14 @@ local function build_progression()
     local root_name = NOTE_NAMES[(root_m % 12) + 1]
     local override_marker = override and ("*"..override) or ""
     result[#result+1] = {
-      notes    = notes,
-      quality  = quality,
-      degree   = deg,
-      duration = dur_beats,
-      dur_bars = dur_bars,
+      notes     = notes,
+      quality   = quality,
+      degree    = deg,
+      duration  = dur_beats,
+      dur_bars  = dur_bars,
+      inversion = inv,
+      root_midi = root_m,                 -- root regardless of inversion
+      bass_midi = notes[1],               -- actual bass after inversion
       is_override = override ~= nil,
       label    = root_name.." "..quality..(inv>0 and (" inv"..inv) or "")
                  ..(override and " *" or ""),
@@ -569,6 +572,178 @@ local function nearest_idx(notes, pitch)
     if d < best_dist then best, best_dist = i, d end
   end
   return best
+end
+
+-- ----------------------------------------------------------------
+--  HARMONIC / VOICE-LEADING HELPERS (shared)
+--
+--  These are deliberately generator-agnostic so that the future bass
+--  layer can reuse them: chord-tone identification, root/bass lookup,
+--  voice-leading toward a chord, diatonic neighbour/leading-tone/
+--  enclosure builders, phrase-arc tension state.
+--
+--  Convention:
+--    chord_pcs   = set { [pc]=true } of chord pitch-classes
+--    scale_pcs   = set { [pc]=true } of scale pitch-classes
+--    scale_notes = sorted list of MIDI pitches in current melody range
+--    chord_range = sorted list of chord-tone MIDI pitches in range
+-- ----------------------------------------------------------------
+
+-- Pitch-class set of the current scale.
+local function scale_pc_set()
+  local mode    = MODE_NAMES[state.mode_idx]
+  local ivs     = SCALE_INTERVALS[mode]
+  local root_pc = (state.root_idx - 1) % 12
+  local pcs     = {}
+  for _, iv in ipairs(ivs) do pcs[(root_pc + iv) % 12] = true end
+  return pcs
+end
+
+-- Pitch-class set of a chord's notes.
+local function chord_pc_set(chord_notes)
+  local pcs = {}
+  for _, n in ipairs(chord_notes) do pcs[n % 12] = true end
+  return pcs
+end
+
+local function is_chord_tone(pitch, chord_pcs) return chord_pcs[pitch % 12] == true end
+local function is_scale_tone(pitch, scale_pcs) return scale_pcs[pitch % 12] == true end
+
+-- Snap a pitch to the nearest chord tone within a sorted chord_range.
+local function nearest_chord_tone(pitch, chord_range)
+  if #chord_range == 0 then return pitch end
+  local best, best_d = chord_range[1], 999
+  for _, n in ipairs(chord_range) do
+    local d = math.abs(n - pitch)
+    if d < best_d then best, best_d = n, d end
+  end
+  return best
+end
+
+-- Pick a chord tone that voice-leads from prev_pitch: prefers stepwise
+-- (≤2 semitones), falls back to smallest leap. Used for chord-change landings
+-- and for future bass landings on chord roots.
+local function voice_lead_to_chord(prev_pitch, chord_range, max_leap)
+  if #chord_range == 0 then return prev_pitch end
+  max_leap = max_leap or 7
+  local best, best_score = chord_range[1], math.huge
+  for _, n in ipairs(chord_range) do
+    local d = math.abs(n - prev_pitch)
+    -- Stepwise heavily preferred; small leaps OK; large leaps penalised.
+    local score
+    if d == 0 then score = 0.5      -- common-tone retention is fine
+    elseif d <= 2 then score = d    -- step
+    elseif d <= max_leap then score = d * 1.5
+    else score = d * 3 end
+    if score < best_score then best, best_score = n, score end
+  end
+  return best
+end
+
+-- Find the index in scale_notes that maps to a given pitch (or nearest).
+local function scale_index_of(scale_notes, pitch)
+  return nearest_idx(scale_notes, pitch)
+end
+
+-- Diatonic step from a pitch by n scale steps (negative = down).
+local function diatonic_step(scale_notes, pitch, n)
+  local i = nearest_idx(scale_notes, pitch)
+  local j = math.max(1, math.min(#scale_notes, i + n))
+  return scale_notes[j]
+end
+
+-- Diatonic neighbour of pitch (dir = +1 upper, -1 lower).
+local function diatonic_neighbor(scale_notes, pitch, dir)
+  return diatonic_step(scale_notes, pitch, dir >= 0 and 1 or -1)
+end
+
+-- Leading-tone (semitone below) approach to a target.
+local function leading_tone_to(target_pitch) return target_pitch - 1 end
+
+-- Chromatic enclosure to a target: returns {upper_diatonic, lower_chromatic}
+-- that resolve into the target by step.
+local function chromatic_enclosure_to(scale_notes, target_pitch)
+  local upper = diatonic_step(scale_notes, target_pitch, 1)
+  local lower = target_pitch - 1
+  return upper, lower
+end
+
+-- ----------------------------------------------------------------
+--  PHRASE-ARC / TENSION SCAFFOLDING
+--
+--  Long-term goal: shape pitch and chord-tone bias across N bars so the
+--  melody arcs (low tension at the start, peak in the middle, resolve
+--  at the end). This is intentionally minimal for now — it stores the
+--  arc on the generation context and exposes a single tension(0..1)
+--  value at any absolute beat. Generators consult it as a soft bias on
+--  chord-tone vs scale-tone selection. Rhythm is *not* affected (the
+--  DAW owns groove); this is purely about pitch colour over time.
+--
+--  Future work:
+--    - per-progression peak placement (e.g. golden-section)
+--    - multi-arc nesting (4-bar antecedent, 4-bar consequent, …)
+--    - cadence-aware drop at progression end
+-- ----------------------------------------------------------------
+
+local function phrase_arc_init(context, total_beats)
+  if context.phrase_arc then return end
+  -- Default: simple arch peaking at ~60% (slightly past centre).
+  context.phrase_arc = {
+    total_beats = math.max(1, total_beats or 1),
+    peak_frac   = 0.6,
+    peak_value  = 0.85,           -- max tension
+    base_value  = 0.10,           -- tension at start/end
+    shape       = "arch",
+  }
+end
+
+-- Returns 0..1 tension at the given absolute beat. 0 = full repose
+-- (chord-tone dominated), 1 = peak tension (more scale tones, larger
+-- intervals, leading tones welcome).
+local function phrase_arc_tension(context, abs_beat)
+  local pa = context.phrase_arc
+  if not pa then return 0.0 end
+  local t = math.max(0, math.min(1, abs_beat / pa.total_beats))
+  local v
+  if pa.shape == "arch" then
+    -- Asymmetric arch with peak at peak_frac.
+    if t < pa.peak_frac then
+      v = t / pa.peak_frac
+    else
+      v = 1.0 - (t - pa.peak_frac) / math.max(0.01, 1.0 - pa.peak_frac)
+    end
+  else
+    v = 0.5
+  end
+  return pa.base_value + (pa.peak_value - pa.base_value) * v
+end
+
+-- ----------------------------------------------------------------
+--  CHORD-TONE LANDING RULE
+--
+--  At chord-block starts and on strong beats, prefer (or require) the
+--  pitch to be a chord tone. This is what gives a melody the sense
+--  that it's being played *over the chords* rather than *despite* them.
+--
+--  Returns a probability in [0,1] that the next note should be a chord
+--  tone, given:
+--    - is_block_start: true if this is the first onset of a new chord
+--    - metric_weight : 0..1 from metrical_weight()
+--    - tension       : 0..1 from phrase_arc_tension()
+--
+--  At low tension the rule is strict; at high tension it relaxes so
+--  the line can climb away from the harmony before resolving.
+-- ----------------------------------------------------------------
+local function chord_tone_landing_prob(is_block_start, metric_weight, tension)
+  tension = tension or 0
+  local p = 0
+  if is_block_start         then p = math.max(p, 0.95) end
+  if metric_weight >= 0.95  then p = math.max(p, 0.85) end   -- downbeat
+  if metric_weight >= 0.55  then p = math.max(p, 0.55) end   -- mid-bar
+  if metric_weight >= 0.30  then p = math.max(p, 0.30) end   -- whole beat
+  -- Tension relaxes the rule by up to ~40%.
+  p = p * (1.0 - 0.4 * tension)
+  return p
 end
 
 -- ----------------------------------------------------------------
@@ -755,38 +930,69 @@ local function pick_duration(min_beats, max_beats)
 end
 
 -- Apply rigidity post-filter: if note is not a chord tone and
--- rng < (1 - rigidity/100), snap to nearest chord tone
+-- rng < (1 - rigidity/100), snap to nearest chord tone.
+-- (Kept as the final safety net; generators now compose with chord
+-- tones up-front, so this fires far less often.)
 local function apply_rigidity(pitch, chord_notes_range)
   if state.mel_rigidity >= 100 then return pitch end
   if #chord_notes_range == 0 then return pitch end
-
-  local pcs = {}
-  for _, n in ipairs(chord_notes_range) do pcs[n % 12] = true end
-  if pcs[pitch % 12] then return pitch end  -- already a chord tone
-
+  if is_chord_tone(pitch, chord_pc_set(chord_notes_range)) then return pitch end
   local snap_prob = 1.0 - (state.mel_rigidity / 100.0)
   if rng_float() < snap_prob then
-    -- Snap to nearest chord tone
-    local best, best_d = chord_notes_range[1], 999
-    for _, n in ipairs(chord_notes_range) do
-      local d = math.abs(n - pitch)
-      if d < best_d then best, best_d = n, d end
-    end
-    return best
+    return nearest_chord_tone(pitch, chord_notes_range)
   end
   return pitch
 end
 
--- Optionally insert a chromatic passing tone between two scale pitches.
--- Only if colour > 0, and only if the two notes are a whole step apart
--- and a semitone step exists between them.
-local function maybe_insert_chromatic(from_pitch, to_pitch)
+-- ----------------------------------------------------------------
+--  COLOUR-TONE LIBRARY
+--
+--  A small palette of musical embellishments inserted between a
+--  previous pitch and the upcoming pitch. All gated by mel_colour;
+--  individual figures additionally require a structural condition
+--  (e.g. leading tones only resolve into a chord tone). Each call
+--  consumes at most one min-grid step of duration from the upcoming
+--  note.
+--
+--  Returns a colour pitch (number) or nil if no figure is appropriate.
+-- ----------------------------------------------------------------
+local function maybe_insert_colour(from_pitch, to_pitch, scale_notes,
+                                    scale_pcs, chord_pcs, target_is_strong)
   if state.mel_colour == 0 then return nil end
-  local diff = to_pitch - from_pitch
-  if math.abs(diff) ~= 2 then return nil end  -- only whole steps get passing tones
   local colour_prob = state.mel_colour / 100.0
   if rng_float() > colour_prob then return nil end
-  return from_pitch + (diff > 0 and 1 or -1)  -- semitone step toward target
+
+  local diff = to_pitch - from_pitch
+
+  -- 1. Leading-tone approach into a chord tone on a strong position.
+  if target_is_strong and is_chord_tone(to_pitch, chord_pcs) then
+    -- Only if approach by step from below is musical (avoid huge backtrack).
+    if math.abs(diff) <= 4 and rng_float() < 0.5 then
+      local lt = leading_tone_to(to_pitch)
+      if math.abs(lt - from_pitch) <= 5 then return lt end
+    end
+  end
+
+  -- 2. Diatonic upper-neighbour into a chord tone (returning to same pitch).
+  if diff == 0 and is_chord_tone(to_pitch, chord_pcs) then
+    if rng_float() < 0.5 then
+      return diatonic_neighbor(scale_notes, to_pitch, 1)
+    else
+      return diatonic_neighbor(scale_notes, to_pitch, -1)
+    end
+  end
+
+  -- 3. Chromatic passing tone between scale notes a whole step apart.
+  if math.abs(diff) == 2 then
+    return from_pitch + (diff > 0 and 1 or -1)
+  end
+
+  -- 4. Diatonic passing run when notes are a third apart.
+  if math.abs(diff) == 3 or math.abs(diff) == 4 then
+    return diatonic_step(scale_notes, from_pitch, diff > 0 and 1 or -1)
+  end
+
+  return nil
 end
 
 -- ----------------------------------------------------------------
@@ -806,6 +1012,22 @@ local function mel_max_beats() return MEL_DURATIONS[state.mel_max_dur_idx].beats
 -- Shared fill function: works entirely in integer grid steps.
 -- grid = min duration in beats = 1 grid step.
 -- All positions are integer multiples of grid — no floating point drift.
+--
+-- pitch_fn contract:
+--   pitch_fn(pos_beats, block_dur, chord_notes, scale_notes, prev_pitch, ctx)
+--   may return:
+--     - a number             : pitch only; rhythm decided by metric grid
+--     - a table { pitch=p, dur_slots=n, vel=v }
+--                             : caller-supplied rhythm (e.g. motif/fractal)
+--                               n is in min-grid steps; vel optional
+--     - nil                  : skip this onset (treated as a rest)
+--
+-- Context keys set per onset (read-only for pitch_fn):
+--   ctx.is_block_start_slot     true on the very first onset of the block
+--   ctx.metric_weight_here      0..1 metrical weight at this onset
+--   ctx.land_chord_tone_p       0..1 desired chord-tone landing probability
+--   ctx.tension_here            0..1 phrase-arc tension at this onset
+--   ctx.scale_pcs / chord_pcs   pitch-class sets (cached for convenience)
 local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
                                pitch_fn, context)
   local grid      = mel_min_beats()
@@ -817,9 +1039,16 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
   local min_slots      = 1  -- 1 grid step = min duration by definition
   local max_slots      = math.floor(mel_max_beats() / grid + 0.5)
 
-  local events = {}
-  local prev   = context.prev_pitch or scale_notes[1] or 60
-  local slot   = 0  -- current slot within block (integer)
+  -- Cache PC sets for the duration of this block
+  local scale_pcs = scale_pc_set()
+  local chord_pcs = chord_pc_set(chord_notes)
+  context.scale_pcs = scale_pcs
+  context.chord_pcs = chord_pcs
+
+  local events       = {}
+  local prev         = context.prev_pitch or scale_notes[1] or 60
+  local slot         = 0          -- current slot within block (integer)
+  local first_onset  = true       -- true until the first non-rest onset
 
   while slot < block_slots do
     local remaining_slots = block_slots - slot
@@ -837,60 +1066,113 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
     local onset_slot     = slot + next_candidate.slot
 
     -- Fill the gap before this onset as silence (rest/advance)
-    -- The onset decision is separate from pitch — rests are chosen here
     slot = onset_slot
-
     if slot >= block_slots then break end
     remaining_slots = block_slots - slot
 
-    -- Pick duration in slots
+    -- Metric / phrase context for this onset
+    local mw       = metrical_weight(abs_start_slot + slot, grid)
+    local abs_beat = (abs_start_slot + slot) * grid
+    local tension  = phrase_arc_tension(context, abs_beat)
+    local landing_p = chord_tone_landing_prob(first_onset, mw, tension)
+
+    context.metric_weight_here  = mw
+    context.tension_here        = tension
+    context.land_chord_tone_p   = landing_p
+    context.is_block_start_slot = first_onset
+
+    -- Default: metric-driven duration
     local dur_slots = pick_dur_slots(
       slot, abs_start_slot, grid,
       min_slots, max_slots, remaining_slots
     )
 
-    -- Rest probability
-    if rng_float() * 100 < state.mel_rest_prob then
+    -- Rest probability — block-start is never a rest (we want the chord
+    -- to be defined on attack), and strong beats rest less often.
+    local rest_p = state.mel_rest_prob
+    if first_onset    then rest_p = 0 end
+    if mw >= 0.95     then rest_p = rest_p * 0.25 end
+
+    if rng_float() * 100 < rest_p then
       slot = slot + dur_slots
     else
-      -- Convert back to beats for the pitch function (which uses beat positions)
       local pos_beats = slot * grid
-      local dur_beats = dur_slots * grid
+      local result    = pitch_fn(pos_beats, block_dur, chord_notes,
+                                 scale_notes, prev, context)
 
-      local pitch = pitch_fn(pos_beats, block_dur, chord_notes, scale_notes, prev, context)
+      local pitch, caller_dur, caller_vel
+      if type(result) == "table" then
+        pitch      = result.pitch
+        caller_dur = result.dur_slots
+        caller_vel = result.vel
+      else
+        pitch = result
+      end
+
       if pitch then
+        -- Caller-supplied rhythm overrides metric grid (motif/fractal).
+        if caller_dur and caller_dur > 0 then
+          dur_slots = math.max(min_slots, math.min(max_slots,
+                                                   math.min(caller_dur, remaining_slots)))
+        end
+
+        -- Cross-block voice leading: at the first onset of a non-first
+        -- block, prefer the pre-staged voice-led chord tone unless the
+        -- generator already returned a chord tone close to it.
+        if first_onset and context.voice_led_target then
+          local vt = context.voice_led_target
+          if not is_chord_tone(pitch, chord_pcs) or math.abs(pitch - vt) > 4 then
+            -- Honour the voice-led target on strong landings.
+            if rng_float() < math.max(0.7, landing_p) then
+              pitch = vt
+            end
+          end
+        end
+
+        -- Chord-tone landing enforcement: with probability landing_p, snap
+        -- a non-chord-tone result to the nearest chord tone. This is an
+        -- additional gate on top of apply_rigidity.
+        if landing_p > 0 and not is_chord_tone(pitch, chord_pcs)
+           and rng_float() < landing_p then
+          pitch = nearest_chord_tone(pitch, chord_range)
+        end
+
         pitch = apply_rigidity(pitch, chord_range)
         pitch = math.max(state.mel_oct_min * 12,
                 math.min((state.mel_oct_max + 1) * 12 - 1, pitch))
 
-        -- Chromatic passing tone: uses min grid step as its duration
-        local chrom = maybe_insert_chromatic(prev, pitch)
-        if chrom and dur_slots > min_slots then
-          local chrom_dur_beats = grid  -- always exactly 1 grid step
+        -- Colour tone (passing/neighbour/leading-tone). Only when there's
+        -- room and we're not at the very first onset (would obscure the
+        -- chord-tone landing).
+        local target_is_strong = mw >= 0.55 or first_onset
+        local colour = nil
+        if not first_onset and dur_slots > min_slots then
+          colour = maybe_insert_colour(prev, pitch, scale_notes,
+                                       scale_pcs, chord_pcs, target_is_strong)
+        end
+        if colour then
+          local cd = grid  -- exactly 1 grid step
           events[#events+1] = {
-            pitch=chrom, pos=pos_beats,
-            dur=chrom_dur_beats, vel=mel_pick_vel(), is_rest=false
+            pitch=colour, pos=pos_beats, dur=cd,
+            vel=(caller_vel or mel_pick_vel()), is_rest=false
           }
-          pos_beats = pos_beats + chrom_dur_beats
-          dur_beats = dur_beats - chrom_dur_beats
+          pos_beats = pos_beats + cd
           dur_slots = dur_slots - 1
-          prev = chrom
+          prev = colour
         end
 
         if dur_slots > 0 then
           events[#events+1] = {
             pitch=pitch, pos=pos_beats,
-            dur=dur_slots * grid, vel=mel_pick_vel(), is_rest=false
+            dur=dur_slots * grid,
+            vel=(caller_vel or mel_pick_vel()), is_rest=false
           }
           prev = pitch
+          first_onset = false
         end
       end
       slot = slot + dur_slots
     end
-
-    -- Advance past this candidate to the next: remove slots up to and
-    -- including the one we just consumed from consideration
-    -- (loop continues from slot naturally)
   end
 
   context.prev_pitch = prev
@@ -1000,11 +1282,14 @@ local function mel_structured(block_dur, chord_notes, scale_notes, chord_range, 
     return 0.5
   end
 
-  local events = {}
-  local pos    = 0
-  local prev   = ctx_tbl.prev_pitch or scale_notes[math.ceil(#scale_notes * 0.5)] or 60
-  local motif  = ctx_tbl.motif_rhythm
-  local mi     = ctx_tbl.motif_pos or 1
+  local events    = {}
+  local pos       = 0
+  local prev      = ctx_tbl.prev_pitch or scale_notes[math.ceil(#scale_notes * 0.5)] or 60
+  local motif     = ctx_tbl.motif_rhythm
+  local mi        = ctx_tbl.motif_pos or 1
+  local scale_pcs = scale_pc_set()
+  local chord_pcs = chord_pc_set(chord_notes)
+  local first     = true
 
   while pos < block_dur - 0.001 do
     local remaining = block_dur - pos
@@ -1012,22 +1297,48 @@ local function mel_structured(block_dur, chord_notes, scale_notes, chord_range, 
     if dur < 0.001 then break end
     mi = (mi % #motif) + 1
 
-    if rng_float() * 100 >= state.mel_rest_prob then
-      local t      = pos / block_dur
-      local cv     = contour_target(t)
-      local ti     = 1 + math.floor(cv * (#scale_notes - 1))
-      ti = math.max(1, math.min(#scale_notes, ti + rng_int(-1, 1)))
-      local pitch  = apply_rigidity(scale_notes[ti], chord_range)
+    -- First onset of the block: never a rest; force a chord-tone landing
+    -- (voice-led from prev_pitch when possible) so chord changes feel
+    -- intentional rather than incidental.
+    local rest_p = (first and 0) or state.mel_rest_prob
+
+    if rng_float() * 100 >= rest_p then
+      local pitch
+      if first then
+        if ctx_tbl.voice_led_target then
+          pitch = ctx_tbl.voice_led_target
+        elseif #chord_range > 0 then
+          local t      = pos / block_dur
+          local cv     = contour_target(t)
+          local ti     = 1 + math.floor(cv * (#scale_notes - 1))
+          ti = math.max(1, math.min(#scale_notes, ti))
+          pitch = nearest_chord_tone(scale_notes[ti], chord_range)
+        else
+          pitch = scale_notes[math.ceil(#scale_notes/2)]
+        end
+      else
+        local t      = pos / block_dur
+        local cv     = contour_target(t)
+        local ti     = 1 + math.floor(cv * (#scale_notes - 1))
+        ti = math.max(1, math.min(#scale_notes, ti + rng_int(-1, 1)))
+        pitch = apply_rigidity(scale_notes[ti], chord_range)
+      end
       pitch = math.max(state.mel_oct_min*12, math.min((state.mel_oct_max+1)*12-1, pitch))
-      local chrom = maybe_insert_chromatic(prev, pitch)
-      if chrom then
+
+      local colour = nil
+      if not first then
+        colour = maybe_insert_colour(prev, pitch, scale_notes,
+                                     scale_pcs, chord_pcs, false)
+      end
+      if colour then
         local cd = math.min(mel_min_beats(), dur * 0.5)
-        events[#events+1] = {pitch=chrom, pos=pos, dur=cd, vel=mel_pick_vel()}
+        events[#events+1] = {pitch=colour, pos=pos, dur=cd, vel=mel_pick_vel()}
         pos = pos + cd; dur = dur - cd
       end
       if dur > 0.001 then
         events[#events+1] = {pitch=pitch, pos=pos, dur=dur, vel=mel_pick_vel()}
         prev = pitch
+        first = false
       end
     end
     pos = pos + dur
@@ -1174,75 +1485,224 @@ local function mel_phrase_answer(block_dur, chord_notes, scale_notes, chord_rang
 end
 
 -- ── 7. FRACTAL ──────────────────────────────────────────────────
+-- Proper L-system / Schenkerian-style diminution: an axiom of
+-- structural tones (chord tones of the home chord) is iteratively
+-- rewritten by replacing each note with a small figure (passing,
+-- neighbour, anticipation, leap-fill). Each iteration halves the
+-- per-note duration, so the final stream is rhythmically self-similar.
+--
+-- The structural skeleton is composed of chord tones, so chord-tone
+-- landings on strong beats are baked in by construction rather than
+-- imposed after the fact. Per chord block the sequence is diatonically
+-- transposed onto a chord tone of the current chord.
 local function mel_fractal(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
-  if not ctx_tbl.fractal_motif then
-    local motif_len = rng_int(3, 5)
-    local motif     = {}
-    local cur_idx   = rng_int(1, #scale_notes)
-    for _ = 1, motif_len do
-      motif[#motif+1] = scale_notes[cur_idx]
-      cur_idx = math.max(1, math.min(#scale_notes, cur_idx + rng_int(-2, 2)))
+  local grid      = mel_min_beats()
+  local min_slots = 1
+  local max_slots = math.floor(mel_max_beats() / grid + 0.5)
+
+  -- L-system productions on a (idx, dur_slots) note. Each rule expands
+  -- a single note into N notes with rhythm subdivided. Rules deliberately
+  -- bias toward stepwise motion and return-to-tone shapes.
+  local function expand_note(entry, sn_len)
+    local idx = entry.idx
+    local d   = entry.d
+    if d <= min_slots then return { entry } end       -- can't subdivide further
+    local half = math.max(min_slots, math.floor(d / 2))
+    local r = rng_float()
+    if r < 0.30 then
+      -- Upper neighbour: idx, idx+1, idx
+      return {
+        { idx = idx, d = half },
+        { idx = math.min(sn_len, idx + 1), d = math.max(min_slots, d - 2*half) > 0 and (d - 2*half) or half },
+        { idx = idx, d = half },
+      }
+    elseif r < 0.55 then
+      -- Lower neighbour: idx, idx-1, idx
+      return {
+        { idx = idx, d = half },
+        { idx = math.max(1, idx - 1), d = math.max(min_slots, d - 2*half) > 0 and (d - 2*half) or half },
+        { idx = idx, d = half },
+      }
+    elseif r < 0.80 then
+      -- Passing toward next structural tone: idx, idx+1 (or idx-1)
+      local dir = (rng_float() < 0.5) and 1 or -1
+      return {
+        { idx = idx, d = half },
+        { idx = math.max(1, math.min(sn_len, idx + dir)), d = d - half },
+      }
+    else
+      -- Anticipation: idx, idx (repeat with shorter onset)
+      return {
+        { idx = idx, d = half },
+        { idx = idx, d = d - half },
+      }
     end
-    ctx_tbl.fractal_motif = motif
-    ctx_tbl.fractal_depth = rng_int(1, 2)
-    ctx_tbl.fractal_ei    = 1
   end
 
-  -- Expand motif
-  local expanded = {table.unpack(ctx_tbl.fractal_motif)}
-  for _ = 1, ctx_tbl.fractal_depth do
-    local new_exp = {}
-    for i = 1, #expanded do
-      new_exp[#new_exp+1] = expanded[i]
-      if i < #expanded then
-        local mid_pitch = (expanded[i] + expanded[i+1]) / 2
-        new_exp[#new_exp+1] = scale_notes[nearest_idx(scale_notes, mid_pitch)]
+  if not ctx_tbl.fractal_seq then
+    -- Axiom: a small chain of chord tones (3–4) of the *first* chord,
+    -- spanning a gentle arch. These become the structural tones.
+    local skeleton = {}
+    if #chord_range >= 2 then
+      local lo_i = math.max(1, math.floor(#chord_range * 0.3))
+      local hi_i = math.min(#chord_range, math.floor(#chord_range * 0.7) + 1)
+      skeleton = { chord_range[lo_i], chord_range[hi_i], chord_range[lo_i] }
+    elseif #chord_range == 1 then
+      skeleton = { chord_range[1] }
+    else
+      skeleton = { scale_notes[math.ceil(#scale_notes/2)] }
+    end
+    -- Convert pitches to (scale-step idx, full-beat duration) entries.
+    local one_beat_slots = math.max(min_slots, math.floor(1.0 / grid + 0.5))
+    local axiom = {}
+    for _, p in ipairs(skeleton) do
+      axiom[#axiom+1] = { idx = nearest_idx(scale_notes, p), d = one_beat_slots }
+    end
+
+    -- Apply 1–2 iterations of L-system expansion.
+    local depth = rng_int(1, 2)
+    local seq   = axiom
+    for _ = 1, depth do
+      local next_seq = {}
+      for _, e in ipairs(seq) do
+        for _, n in ipairs(expand_note(e, #scale_notes)) do
+          next_seq[#next_seq+1] = n
+        end
       end
+      seq = next_seq
     end
-    expanded = new_exp
+
+    ctx_tbl.fractal_seq      = seq
+    ctx_tbl.fractal_seed_idx = axiom[1].idx
+    ctx_tbl.fractal_ei       = 1
   end
 
-  local ei = ctx_tbl.fractal_ei or 1
+  -- Per-block diatonic transposition onto a chord tone of this chord.
+  if ctx_tbl.fractal_block_transp_for ~= ctx_tbl.abs_block_start then
+    local target
+    if ctx_tbl.voice_led_target then
+      target = ctx_tbl.voice_led_target
+    elseif #chord_range > 0 then
+      target = nearest_chord_tone(scale_notes[ctx_tbl.fractal_seed_idx], chord_range)
+    else
+      target = scale_notes[ctx_tbl.fractal_seed_idx]
+    end
+    ctx_tbl.fractal_block_transp = nearest_idx(scale_notes, target)
+                                 - ctx_tbl.fractal_seed_idx
+    ctx_tbl.fractal_block_transp_for = ctx_tbl.abs_block_start
+  end
 
+  local seq = ctx_tbl.fractal_seq
   local function pitch_fn(pos, bdur, cn, sn, prev, c)
-    local p = expanded[ei]
-    ei = (ei % #expanded) + 1
-    c.fractal_ei = ei
-    return p
+    local ei = c.fractal_ei or 1
+    local entry = seq[ei]
+    local idx = math.max(1, math.min(#sn, entry.idx + c.fractal_block_transp))
+    c.fractal_ei = (ei % #seq) + 1
+    return { pitch = sn[idx], dur_slots = entry.d }
   end
 
   return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
 end
 
 -- ── 8. MOTIF ────────────────────────────────────────────────────
+-- A short cell (3–5 notes) with its own rhythm and a deliberately
+-- singable interval profile (mostly steps, at most one third). On
+-- every chord change the cell is *diatonically transposed* so that
+-- its first (or strongest) note lands on a chord tone of the new
+-- chord — this is the technique behind every melodic sequence in
+-- common-practice writing.
+--
+-- The cell stores (scale_idx, dur_slots) so its rhythm survives
+-- `mel_fill_block`'s metric grid. Periodic variation: occasional
+-- inversion or retrograde of the cell, keeping the rhythm intact.
 local function mel_motif(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  local grid       = mel_min_beats()
+  local min_slots  = 1
+  local max_slots  = math.floor(mel_max_beats() / grid + 0.5)
+
+  -- Build the seed cell once per progression.
   if not ctx_tbl.motif_cell then
     local cell_len = rng_int(3, 5)
     local cell     = {}
-    local ci       = rng_int(1, #scale_notes)
-    for _ = 1, cell_len do
-      cell[#cell+1] = { idx=ci, dur=pick_duration(mel_min_beats(), mel_max_beats()) }
-      ci = math.max(1, math.min(#scale_notes, ci + rng_int(-2, 2)))
+    -- Start the cell on a chord tone of the *first* chord, mid-range.
+    local start_p  = chord_range[math.max(1, math.floor(#chord_range/2))]
+                  or scale_notes[math.ceil(#scale_notes/2)]
+    local idx      = nearest_idx(scale_notes, start_p)
+    -- Interval shape: mostly ±1 steps, occasional ±2 (a third), with
+    -- a small chance of a return to the previous note.
+    local interval_pool = { -2, -1, -1, -1, 0, 1, 1, 1, 2 }
+    -- Reasonable rhythmic palette in min-grid steps. Skews to ≤ a beat
+    -- so the motif feels phrasal rather than ponderous.
+    local rhythm_pool = {}
+    do
+      local one_beat_slots = math.floor(1.0 / grid + 0.5)
+      local cands = { 1, 1, 2, 2, one_beat_slots, math.max(1, math.floor(one_beat_slots/2)) }
+      for _, v in ipairs(cands) do
+        if v >= min_slots and v <= max_slots then rhythm_pool[#rhythm_pool+1] = v end
+      end
+      if #rhythm_pool == 0 then rhythm_pool = { min_slots } end
     end
-    ctx_tbl.motif_cell   = cell
-    ctx_tbl.motif_ci     = 1
-    ctx_tbl.motif_transp = 0
+    for i = 1, cell_len do
+      local d = rhythm_pool[rng_int(1, #rhythm_pool)]
+      cell[#cell+1] = { idx_offset = idx - nearest_idx(scale_notes, start_p),
+                        dur_slots  = d }
+      local step = interval_pool[rng_int(1, #interval_pool)]
+      idx = math.max(1, math.min(#scale_notes, idx + step))
+    end
+    ctx_tbl.motif_cell      = cell
+    ctx_tbl.motif_seed_idx  = nearest_idx(scale_notes, start_p)
+    ctx_tbl.motif_ci        = 1
+    ctx_tbl.motif_block_n   = 0      -- counts blocks consumed (for variation)
+    ctx_tbl.motif_invert    = false
+    ctx_tbl.motif_retro     = false
+  end
+
+  -- Per-chord-block: compute a diatonic transposition that lands the
+  -- cell's first note on a chord tone of *this* chord, voice-led from
+  -- prev_pitch when possible. Fires exactly once per chord block.
+  if ctx_tbl.motif_block_transp_for ~= ctx_tbl.abs_block_start then
+    -- Restart the cell at its first note for each new chord block so the
+    -- diatonic transposition aligns with the cell's strongest moment.
+    ctx_tbl.motif_ci = 1
+    local prev = ctx_tbl.prev_pitch
+    local target
+    if prev and ctx_tbl.voice_led_target then
+      target = ctx_tbl.voice_led_target
+    elseif #chord_range > 0 then
+      -- Pick the chord tone closest to the cell's seed pitch.
+      local seed_pitch = scale_notes[ctx_tbl.motif_seed_idx]
+                      or scale_notes[math.ceil(#scale_notes/2)]
+      target = nearest_chord_tone(seed_pitch, chord_range)
+    else
+      target = scale_notes[ctx_tbl.motif_seed_idx]
+    end
+    local target_idx = nearest_idx(scale_notes, target)
+    ctx_tbl.motif_block_transp = target_idx - ctx_tbl.motif_seed_idx
+    ctx_tbl.motif_block_transp_for = ctx_tbl.abs_block_start
+    ctx_tbl.motif_block_n  = (ctx_tbl.motif_block_n or 0) + 1
+    -- Light variation every 4 blocks: invert intervals or retrograde.
+    if ctx_tbl.motif_block_n % 4 == 0 then
+      if rng_float() < 0.5 then
+        ctx_tbl.motif_invert = not ctx_tbl.motif_invert
+      else
+        ctx_tbl.motif_retro = not ctx_tbl.motif_retro
+      end
+    end
   end
 
   local cell   = ctx_tbl.motif_cell
-  local ci     = ctx_tbl.motif_ci
-  local transp = ctx_tbl.motif_transp
-
   local function pitch_fn(pos, bdur, cn, sn, prev, c)
-    if ci == 1 and rng_float() < 0.3 then
-      transp = math.max(-3, math.min(3, transp + rng_int(-1, 1)))
-      c.motif_transp = transp
-    end
-    local idx   = math.max(1, math.min(#sn, cell[ci].idx + transp))
+    local ci   = c.motif_ci or 1
+    local len  = #cell
+    local read_i = c.motif_retro and (len - ci + 1) or ci
+    local entry = cell[read_i]
+    local off   = entry.idx_offset
+    if c.motif_invert then off = -off end
+    local idx   = math.max(1, math.min(#sn,
+                          c.motif_seed_idx + c.motif_block_transp + off))
     local pitch = sn[idx]
-    ci = (ci % #cell) + 1
-    c.motif_ci = ci
-    return pitch
+    c.motif_ci  = (ci % len) + 1
+    return { pitch = pitch, dur_slots = entry.dur_slots }
   end
 
   return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
@@ -1262,13 +1722,34 @@ local function build_melody_events(progression)
   local events  = {}
   local abs_pos = 0
 
-  for _, ch in ipairs(progression) do
+  -- Total length of the whole progression — feeds the phrase-arc tension
+  -- curve. Generators read `phrase_arc_tension(context, abs_beat)` to bias
+  -- toward chord tones at the start/end and tolerate scale tones near the
+  -- peak. This is the long-term hook for N-bar arcs and nested phrasing.
+  local total_beats = 0
+  for _, ch in ipairs(progression) do total_beats = total_beats + ch.duration end
+  phrase_arc_init(context, total_beats)
+
+  for ci, ch in ipairs(progression) do
     local scale_notes  = scale_notes_in_range()
     local chord_range  = chord_notes_in_range(ch.notes)
     if #scale_notes == 0 then
       abs_pos = abs_pos + ch.duration
     else
       context.abs_block_start = abs_pos  -- absolute beat of this chord block's start
+      context.chord_meta      = ch
+      context.is_first_block  = (ci == 1)
+
+      -- Cross-block voice leading: when we know prev_pitch from the
+      -- previous chord, pre-stage a voice-led target chord tone for
+      -- this block's first onset. Generators may consult
+      -- ctx.voice_led_target on their first call to land smoothly.
+      if context.prev_pitch and not context.is_first_block then
+        context.voice_led_target = voice_lead_to_chord(context.prev_pitch, chord_range)
+      else
+        context.voice_led_target = nil
+      end
+
       local block_evs = gen_fn(ch.duration, ch.notes, scale_notes, chord_range, context)
       for _, ev in ipairs(block_evs) do
         events[#events+1] = {
