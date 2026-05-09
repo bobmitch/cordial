@@ -800,23 +800,22 @@ local function build_onset_candidates(block_slots, abs_start_slot, grid)
   for s = 0, block_slots - 1 do
     local mw = metrical_weight(abs_start_slot + s, grid)
 
-    -- Gate: at metre=0 all slots pass; at metre=1 only strong beats pass.
-    -- A slot is included if its weight exceeds the metre threshold,
-    -- or probabilistically for intermediate values.
+    -- Gate: at metre=0 all slots pass; at metre=1 every whole beat passes
+    -- and sub-beat positions are rejected. Threshold is capped at 0.35
+    -- (the weight of a generic whole beat) so metre=1 doesn't degenerate
+    -- to bar-downbeat-only. Sub-threshold slots admit probabilistically,
+    -- with the probability scaled by (1 - metre) so it vanishes at the top.
     local include
     if metre < 0.01 then
       include = true
     elseif mw >= 1.0 - 0.01 then
       include = true   -- downbeats always pass
     else
-      -- Threshold rises with metre. At metre=1, only weight>=1.0 passes.
-      -- At metre=0.5, weight>=0.5 reliably passes, lower ones probabilistic.
-      local pass_threshold = metre * 0.9  -- weight needed to always pass
+      local pass_threshold = math.min(0.35, metre * 0.9)
       if mw >= pass_threshold then
         include = true
       else
-        -- Probabilistic admission: higher weight = higher chance
-        local admit_prob = mw / pass_threshold
+        local admit_prob = (mw / pass_threshold) * (1 - metre)
         include = rng_float() < admit_prob
       end
     end
@@ -2715,8 +2714,8 @@ local function draw_ui()
     state.mel_metre < 25  and "loose — slight beat preference" or
     state.mel_metre < 50  and "moderate — favours beats" or
     state.mel_metre < 75  and "strong — snaps to beat grid" or
-    state.mel_metre < 90  and "strict — downbeat-driven" or
-    "locked — onsets on min-grid ("..MEL_DUR_NAMES[state.mel_min_dur_idx]..")")
+    state.mel_metre < 90  and "strict — beats only, sub-beats rare" or
+    "locked — onsets on whole beats (min-grid: "..MEL_DUR_NAMES[state.mel_min_dur_idx]..")")
 
   -- ── Live Preview ─────────────────────────────────────────────
   reaper.ImGui_SeparatorText(ctx, "Live Preview")
