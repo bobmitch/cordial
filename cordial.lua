@@ -685,15 +685,16 @@ end
 --    - cadence-aware drop at progression end
 -- ----------------------------------------------------------------
 
-local function phrase_arc_init(context, total_beats)
-  if context.phrase_arc then return end
-  -- Default: simple arch peaking at ~60% (slightly past centre).
+local function phrase_arc_init(context, total_beats, cycle_offset)
+  -- Re-initialised each cycle so the arc shape repeats per progression
+  -- pass; cycle_offset rebases tension calc onto the current cycle.
   context.phrase_arc = {
-    total_beats = math.max(1, total_beats or 1),
-    peak_frac   = 0.6,
-    peak_value  = 0.85,           -- max tension
-    base_value  = 0.10,           -- tension at start/end
-    shape       = "arch",
+    total_beats  = math.max(1, total_beats or 1),
+    cycle_offset = cycle_offset or 0,
+    peak_frac    = 0.6,
+    peak_value   = 0.85,           -- max tension
+    base_value   = 0.10,           -- tension at start/end
+    shape        = "arch",
   }
 end
 
@@ -703,7 +704,8 @@ end
 local function phrase_arc_tension(context, abs_beat)
   local pa = context.phrase_arc
   if not pa then return 0.0 end
-  local t = math.max(0, math.min(1, abs_beat / pa.total_beats))
+  local rel = abs_beat - (pa.cycle_offset or 0)
+  local t = math.max(0, math.min(1, rel / pa.total_beats))
   local v
   if pa.shape == "arch" then
     -- Asymmetric arch with peak at peak_frac.
@@ -1716,21 +1718,20 @@ local MEL_GEN_FNS = {
   mel_mechanical, mel_phrase_answer, mel_fractal, mel_motif,
 }
 
--- Build full melody event list for entire progression.
--- Returns flat list of {pitch, pos, dur, vel} (pos = absolute beats from item start)
-local function build_melody_events(progression)
+-- Build one cycle of the progression, appending to `events` and mutating
+-- `context`. `cycle_offset` is the absolute beat where this cycle starts;
+-- subsequent cycles re-use the same context (preserving prev_pitch, motif
+-- cell etc.) so the RNG stream and musical state continue smoothly.
+-- Returns the absolute beat where this cycle ended.
+local function build_melody_cycle(progression, context, events, cycle_offset)
   local gen_fn = MEL_GEN_FNS[state.mel_preset_idx] or mel_free
-  local context = {}   -- persistent state across chord blocks (prev_pitch etc.)
-  local events  = {}
-  local abs_pos = 0
+  local abs_pos = cycle_offset
 
-  -- Total length of the whole progression — feeds the phrase-arc tension
-  -- curve. Generators read `phrase_arc_tension(context, abs_beat)` to bias
-  -- toward chord tones at the start/end and tolerate scale tones near the
-  -- peak. This is the long-term hook for N-bar arcs and nested phrasing.
+  -- Phrase-arc tension repeats per cycle: each progression pass arcs from
+  -- repose → peak → repose, so cycle 2 isn't stuck at "end of arc" tension.
   local total_beats = 0
   for _, ch in ipairs(progression) do total_beats = total_beats + ch.duration end
-  phrase_arc_init(context, total_beats)
+  phrase_arc_init(context, total_beats, cycle_offset)
 
   for ci, ch in ipairs(progression) do
     local scale_notes  = scale_notes_in_range()
@@ -1738,14 +1739,14 @@ local function build_melody_events(progression)
     if #scale_notes == 0 then
       abs_pos = abs_pos + ch.duration
     else
-      context.abs_block_start = abs_pos  -- absolute beat of this chord block's start
+      context.abs_block_start = abs_pos
       context.chord_meta      = ch
-      context.is_first_block  = (ci == 1)
+      -- "First block" gates voice-leading: only true on the very first
+      -- block of the very first cycle, when there's no prior pitch to
+      -- lead from. Cycle 2's first chord must voice-lead from cycle 1's
+      -- last pitch.
+      context.is_first_block  = (cycle_offset == 0 and ci == 1)
 
-      -- Cross-block voice leading: when we know prev_pitch from the
-      -- previous chord, pre-stage a voice-led target chord tone for
-      -- this block's first onset. Generators may consult
-      -- ctx.voice_led_target on their first call to land smoothly.
       if context.prev_pitch and not context.is_first_block then
         context.voice_led_target = voice_lead_to_chord(context.prev_pitch, chord_range)
       else
@@ -1765,7 +1766,16 @@ local function build_melody_events(progression)
     end
   end
 
-  return events, abs_pos
+  return abs_pos
+end
+
+-- Single-cycle melody for offline render (write_all). Live preview uses
+-- build_melody_cycle directly so it can extend indefinitely.
+local function build_melody_events(progression)
+  local context = {}
+  local events  = {}
+  local abs_end = build_melody_cycle(progression, context, events, 0)
+  return events, abs_end
 end
 
 -- ----------------------------------------------------------------
@@ -2051,19 +2061,45 @@ end
 
 local function mel_live_rebuild(progression)
   rng_seed(state.seed)
-  -- Consume arp RNG stream first (same order as write_all) so melody is consistent
+  -- Consume arp RNG stream first (same order as write_all) so melody is
+  -- consistent with the rendered version's first cycle.
   local cursor_abs = reaper.GetCursorPosition() * reaper.Master_GetTempo() / 60.0
   local pos = 0
   for _, ch in ipairs(progression) do
     build_arp_events(ch.notes, ch.duration, cursor_abs + pos)
     pos = pos + ch.duration
   end
-  -- Now generate melody (RNG stream continues from here)
-  local events, total = build_melody_events(progression)
-  state.mel_live_events      = events
-  state.mel_live_total_beats = total
-  state.mel_live_last_idx    = -1
+  -- Live preview generates lazily one progression cycle at a time, keeping
+  -- RNG state and generator context across cycles so the melody continues
+  -- forward instead of repeating. Edits clear this state and restart from
+  -- the same seed; the randomise button picks a new seed first.
+  local cycle_beats = 0
+  for _, ch in ipairs(progression) do cycle_beats = cycle_beats + ch.duration end
+  state.mel_live_events       = {}
+  state.mel_live_context      = {}
+  state.mel_live_cycle_beats  = cycle_beats
+  state.mel_live_total_beats  = 0
+  state.mel_live_last_idx     = -1
+  if cycle_beats > 0 then
+    state.mel_live_total_beats = build_melody_cycle(
+      progression, state.mel_live_context, state.mel_live_events, 0)
+  end
   mel_live_note_off()
+end
+
+-- Extend the live event list with additional cycles until it reaches at
+-- least `target_beats` of generated content. RNG state and context persist
+-- across cycles, so each extension is a deterministic continuation.
+local function mel_live_extend_to(progression, target_beats)
+  local cycle_beats = state.mel_live_cycle_beats or 0
+  if cycle_beats <= 0 then return end
+  while state.mel_live_total_beats < target_beats do
+    state.mel_live_total_beats = build_melody_cycle(
+      progression,
+      state.mel_live_context,
+      state.mel_live_events,
+      state.mel_live_total_beats)
+  end
 end
 
 local function mel_live_tick(progression)
@@ -2076,13 +2112,16 @@ local function mel_live_tick(progression)
     state.mel_live_last_idx = -1; state.mel_wait_boundary = true
   end
   local events      = state.mel_live_events
-  local total_beats = state.mel_live_total_beats
-  if not events or #events == 0 or total_beats == 0 then return end
-  local pos_beats  = reaper.GetPlayPosition() * reaper.Master_GetTempo() / 60.0
-  local loop_beats = pos_beats % total_beats
+  local cycle_beats = state.mel_live_cycle_beats or 0
+  if not events or cycle_beats == 0 then return end
+  local pos_beats = reaper.GetPlayPosition() * reaper.Master_GetTempo() / 60.0
+  -- Keep at least one full cycle of events ahead of the playhead so the
+  -- lookup loop below always lands on a valid event when one exists.
+  mel_live_extend_to(progression, pos_beats + cycle_beats)
+  if #events == 0 then return end
   local cur_idx = -1
   for i, ev in ipairs(events) do
-    if ev.pos <= loop_beats then cur_idx = i else break end
+    if ev.pos <= pos_beats then cur_idx = i else break end
   end
   if reaper.ImGui_IsAnyItemActive(ctx) then
     mel_live_note_off(); state.mel_wait_boundary=true; state.mel_live_last_idx=cur_idx; return
@@ -2098,14 +2137,14 @@ local function mel_live_tick(progression)
   if cur_idx ~= state.mel_live_last_idx then
     mel_live_note_off()
     local ev = events[cur_idx]
-    if loop_beats < ev.pos + ev.dur then
+    if pos_beats < ev.pos + ev.dur then
       reaper.StuffMIDIMessage(0, 0x90 | state.mel_channel, ev.pitch, ev.vel)
       state.mel_live_note     = ev.pitch
       state.mel_live_note_end = ev.pos + ev.dur
     end
     state.mel_live_last_idx = cur_idx
   else
-    if state.mel_live_note >= 0 and loop_beats >= state.mel_live_note_end then
+    if state.mel_live_note >= 0 and pos_beats >= state.mel_live_note_end then
       mel_live_note_off()
     end
   end
