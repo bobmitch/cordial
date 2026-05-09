@@ -1255,10 +1255,13 @@ local function mel_structured(block_dur, chord_notes, scale_notes, chord_range, 
     local motif_len = rng_int(2, 4)
     for _ = 1, motif_len do
       local d = pick_duration(mel_min_beats(), mel_max_beats())
-      -- At high metre, snap motif durations to whole beats so the motif
-      -- aligns naturally with the bar grid when repeated
+      -- At high metre, snap motif durations to the melody's min-note grid
+      -- so onsets always land on the user-selected rhythmic resolution.
+      -- Previously this forced durations to ≥1 beat, which silently
+      -- overrode a finer Min selection (e.g. 1/16) at metre ≥ 60.
       if state.mel_metre >= 60 then
-        d = math.max(1.0, math.floor(d + 0.5))
+        local grid = mel_min_beats()
+        d = math.max(grid, math.floor(d / grid + 0.5) * grid)
       end
       motif[#motif+1] = d
     end
@@ -2686,8 +2689,15 @@ local function draw_ui()
   local mrigc, mrigv = sslider("Rigidity##mrig", state.mel_rigidity, 0, 100, 130)
   if mrigc then state.mel_rigidity = mrigv; state.mel_live_events=nil end
   reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_TextDisabled(ctx, state.mel_rigidity==0 and "chord tones only"
-    or state.mel_rigidity < 50 and "chord-weighted" or "scale-free")
+  -- apply_rigidity snaps non-chord tones with prob (1 - rigidity/100), and
+  -- stops snapping entirely only at 100. Label the slider accordingly.
+  local mrlabels = {"chord tones only","mostly chord, hint of scale","chord-leaning blend",
+                    "scale-leaning blend","mostly scale, anchored by chord",
+                    "full scale (key/"..MODE_DISPLAY[state.mode_idx]..")"}
+  local mri = state.mel_rigidity == 0 and 1 or state.mel_rigidity < 25 and 2
+    or state.mel_rigidity < 50 and 3 or state.mel_rigidity < 75 and 4
+    or state.mel_rigidity < 100 and 5 or 6
+  reaper.ImGui_TextDisabled(ctx, mrlabels[mri])
   reaper.ImGui_SameLine(ctx)
   local mcolc, mcolv = sslider("Colour##mcol", state.mel_colour, 0, 100, 100)
   if mcolc then state.mel_colour = mcolv; state.mel_live_events=nil end
@@ -2706,7 +2716,7 @@ local function draw_ui()
     state.mel_metre < 50  and "moderate — favours beats" or
     state.mel_metre < 75  and "strong — snaps to beat grid" or
     state.mel_metre < 90  and "strict — downbeat-driven" or
-    "locked — beat grid only")
+    "locked — onsets on min-grid ("..MEL_DUR_NAMES[state.mel_min_dur_idx]..")")
 
   -- ── Live Preview ─────────────────────────────────────────────
   reaper.ImGui_SeparatorText(ctx, "Live Preview")
