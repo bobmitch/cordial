@@ -378,6 +378,7 @@ local state = {
   mel_rigidity     = 30,         -- 0=chord tones only, 100=full scale (post-filter)
   mel_colour       = 0,          -- 0=scale only, 100=chromatic passing tones allowed
   mel_metre        = 50,         -- 0=free (no beat awareness), 100=strong beat enforcement
+  mel_render_cycles = 4,         -- offline write: number of progression cycles to render
 
   -- Melody live preview
   mel_live_enabled  = false,
@@ -2210,8 +2211,10 @@ local function write_all()
     return
   end
 
-  local total_beats = 0
-  for _, ch in ipairs(progression) do total_beats = total_beats + ch.duration end
+  local cycle_beats = 0
+  for _, ch in ipairs(progression) do cycle_beats = cycle_beats + ch.duration end
+  local cycles      = math.max(1, math.floor(state.mel_render_cycles or 1))
+  local total_beats = cycle_beats * cycles
 
   local ppq        = state.ppq_per_beat
   local tempo      = reaper.Master_GetTempo()
@@ -2220,19 +2223,22 @@ local function write_all()
   local cursor_abs = item_start * tempo / 60.0
   local written    = {}
 
-  -- Chord layer
+  -- Chord layer: chord progression repeats verbatim each cycle.
   if state.chord_enabled then
     local track  = get_or_create_track(state.chord_track_name)
     local events = {}
-    local pos    = 0
-    for _, ch in ipairs(progression) do
-      for _, note in ipairs(ch.notes) do
-        events[#events+1] = {
-          pitch=note, pos=pos, dur=ch.duration-(1/ppq),
-          vel=state.chord_velocity, channel=state.chord_channel,
-        }
+    for cyc = 0, cycles - 1 do
+      local cyc_off = cyc * cycle_beats
+      local pos = 0
+      for _, ch in ipairs(progression) do
+        for _, note in ipairs(ch.notes) do
+          events[#events+1] = {
+            pitch=note, pos=cyc_off+pos, dur=ch.duration-(1/ppq),
+            vel=state.chord_velocity, channel=state.chord_channel,
+          }
+        end
+        pos = pos + ch.duration
       end
-      pos = pos + ch.duration
     end
     local _, err = write_midi_item(track, item_start, item_len, events, ppq)
     if err then
@@ -2242,20 +2248,29 @@ local function write_all()
     written[#written+1] = state.chord_track_name
   end
 
-  -- Arp layer
+  -- Arp layer: consume exactly one cycle of arp RNG (so the melody RNG
+  -- stream stays aligned with the live preview), then repeat the resulting
+  -- pattern verbatim for each subsequent cycle.
   if state.arp_enabled then
     local track  = get_or_create_track(state.arp_track_name)
-    local events = {}
-    local pos    = 0
+    local cycle_evs = {}
+    local pos = 0
     for _, ch in ipairs(progression) do
       local arp_evs = build_arp_events(ch.notes, ch.duration, cursor_abs + pos)
       for _, ev in ipairs(arp_evs) do
+        cycle_evs[#cycle_evs+1] = {pitch=ev.pitch, pos=pos+ev.pos, dur=ev.dur, vel=ev.vel}
+      end
+      pos = pos + ch.duration
+    end
+    local events = {}
+    for cyc = 0, cycles - 1 do
+      local cyc_off = cyc * cycle_beats
+      for _, ev in ipairs(cycle_evs) do
         events[#events+1] = {
-          pitch=ev.pitch, pos=pos+ev.pos, dur=ev.dur,
+          pitch=ev.pitch, pos=cyc_off+ev.pos, dur=ev.dur,
           vel=ev.vel, channel=state.arp_channel,
         }
       end
-      pos = pos + ch.duration
     end
     local _, err = write_midi_item(track, item_start, item_len, events, ppq)
     if err then
@@ -2265,10 +2280,17 @@ local function write_all()
     written[#written+1] = state.arp_track_name
   end
 
-  -- Melody layer
+  -- Melody layer: continuously generated across cycles using shared context
+  -- and the live RNG stream. Same seed + same inputs + same cycle count =
+  -- identical output, and the first N cycles match live preview cycles 1..N.
   if state.mel_enabled then
-    local track = get_or_create_track(state.mel_track_name)
-    local mel_evs, _ = build_melody_events(progression)
+    local track   = get_or_create_track(state.mel_track_name)
+    local context = {}
+    local mel_evs = {}
+    local abs_pos = 0
+    for _ = 1, cycles do
+      abs_pos = build_melody_cycle(progression, context, mel_evs, abs_pos)
+    end
     local events = {}
     for _, ev in ipairs(mel_evs) do
       events[#events+1] = {
@@ -2286,12 +2308,13 @@ local function write_all()
 
   local total_bars = 0
   for _, ch in ipairs(progression) do total_bars = total_bars + ch.dur_bars end
+  total_bars = total_bars * cycles
   reaper.UpdateArrange()
   reaper.Undo_EndBlock("Chord Generator: write all layers", -1)
   state.status_msg = string.format(
-    "Written to [%s]  |  seed %d  |  %d bars (%d/%d) @ cursor.",
+    "Written to [%s]  |  seed %d  |  %d bars (%d×%d/%d) @ cursor.",
     table.concat(written, ", "), state.seed,
-    total_bars, state.timesig_num, state.timesig_denom
+    total_bars, cycles, state.timesig_num, state.timesig_denom
   )
 end
 
@@ -2822,6 +2845,11 @@ local function draw_ui()
     write_all()
     state.status_msg = "[KEPT]  "..state.status_msg
   end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 90)
+  local rcc, rcv = reaper.ImGui_SliderInt(ctx, "cycles##rendercycles",
+                                          state.mel_render_cycles, 1, 32)
+  if rcc then state.mel_render_cycles = rcv end
 
   reaper.ImGui_Spacing(ctx)
   reaper.ImGui_Separator(ctx)
