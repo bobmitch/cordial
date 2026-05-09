@@ -2,7 +2,9 @@
 --  Chord Generator  –  Phase 3
 --  Adds: melody layer with 8 generation presets, rigidity,
 --        colour (chromatic passing tones), min/max duration,
---        metre (beat placement enforcement), live preview
+--        metre (beat placement enforcement),
+--        busyness (arc-shaped density / clustering of shorter
+--        notes around bar/half-bar landmarks), live preview
 --
 --  Requires: ReaImGui extension (install via ReaPack)
 -- ============================================================
@@ -374,7 +376,7 @@ local state = {
   mel_vel_human    = 20,
   mel_oct_min      = 4,          -- minimum octave for melody
   mel_oct_max      = 5,          -- maximum octave for melody
-  mel_rest_prob    = 15,         -- % chance of a rest at each note position
+  mel_busyness     = 45,         -- 0=sparse/long-held, 100=dense/clustered bursts
   mel_rigidity     = 30,         -- 0=chord tones only, 100=full scale (post-filter)
   mel_colour       = 0,          -- 0=scale only, 100=chromatic passing tones allowed
   mel_metre        = 50,         -- 0=free (no beat awareness), 100=strong beat enforcement
@@ -721,6 +723,34 @@ local function phrase_arc_tension(context, abs_beat)
   return pa.base_value + (pa.peak_value - pa.base_value) * v
 end
 
+-- Returns 0..1 rhythmic density at the given absolute beat.
+--  - At low busyness: nearly flat, low value (sparse, long-held notes).
+--  - At mid busyness: a mild arch tracking the phrase arc.
+--  - At high busyness: a pronounced arch — bursts cluster at the crest,
+--    sparser at the edges so the line still breathes.
+-- Density is consumed by the rest gate and by pick_dur_slots' duration
+-- bias; clustering of short notes therefore emerges from the same arc
+-- shape that drives pitch tension, rather than a parallel system.
+local function phrase_arc_density(context, abs_beat)
+  local busy = (state.mel_busyness or 50) / 100.0
+  local pa = context.phrase_arc
+  local arch = 0.5
+  if pa then
+    local rel = abs_beat - (pa.cycle_offset or 0)
+    local t = math.max(0, math.min(1, rel / pa.total_beats))
+    if t < pa.peak_frac then
+      arch = t / math.max(0.01, pa.peak_frac)
+    else
+      arch = 1.0 - (t - pa.peak_frac) / math.max(0.01, 1.0 - pa.peak_frac)
+    end
+  end
+  -- Amplitude grows with busyness so low values stay flat and high
+  -- values swing strongly between trough and crest.
+  local amplitude = 0.45 * busy
+  local v = busy + amplitude * (arch - 0.5)
+  return math.max(0, math.min(1, v))
+end
+
 -- ----------------------------------------------------------------
 --  CHORD-TONE LANDING RULE
 --
@@ -846,6 +876,7 @@ local function pick_dur_slots(onset_slot, abs_start_slot, grid,
 
   local mw     = metrical_weight(abs_start_slot + onset_slot, grid)
   local metre  = state.mel_metre / 100.0
+  local busy   = (state.mel_busyness or 50) / 100.0
 
   -- Build list of candidate durations (integer multiples of min_slots
   -- that correspond to valid MEL_DURATIONS grid values)
@@ -862,7 +893,10 @@ local function pick_dur_slots(onset_slot, abs_start_slot, grid,
   if #valid == 0 then return math.min(min_slots, remaining_slots) end
   table.sort(valid)
 
-  -- Duration bias: strong onset → prefer longer; weak onset → prefer shorter
+  -- Duration bias: strong onset → prefer longer; weak onset → prefer shorter.
+  -- Busyness then shears the bias: low busy → push toward longer regardless
+  -- of metric weight; high busy → push toward shorter so subdivision bursts
+  -- become the default. The two terms are blended, so metre still matters.
   local weights = {}
   local total   = 0
   for i, _ in ipairs(valid) do
@@ -876,7 +910,13 @@ local function pick_dur_slots(onset_slot, abs_start_slot, grid,
       bias = 1.0 - norm                   -- weak: shorter preferred
     end
     bias = math.max(0.05, bias)
-    local w = (1.0 - metre) * (1.0 / #valid) + metre * bias
+    -- Busy bias: 0→favour long (norm), 1→favour short (1-norm).
+    local busy_bias = math.max(0.05, (1.0 - busy) * norm + busy * (1.0 - norm))
+    local metric_term = (1.0 - metre) * (1.0 / #valid) + metre * bias
+    -- Busyness influence grows toward the extremes (|busy-0.5|), so a
+    -- mid setting leaves the metric/metre logic mostly untouched.
+    local busy_strength = math.abs(busy - 0.5) * 2.0 * 0.7
+    local w = (1.0 - busy_strength) * metric_term + busy_strength * busy_bias
     weights[i] = w
     total = total + w
   end
@@ -886,9 +926,12 @@ local function pick_dur_slots(onset_slot, abs_start_slot, grid,
   for i, w in ipairs(weights) do
     acc = acc + w
     if r <= acc then
-      -- Endpoint snap: at high metre, extend to fill to next beat boundary
+      -- Endpoint snap: at high metre OR high busyness, extend a sub-beat
+      -- duration to the next quarter so subdivision bursts begin and end
+      -- on quarter-note boundaries rather than drifting across them.
       local chosen = valid[i]
-      if metre >= 0.5 then
+      local snap_drive = math.max(metre, busy)
+      if snap_drive >= 0.5 then
         local endpoint_slot = onset_slot + chosen
         local endpoint_abs  = (abs_start_slot + endpoint_slot) * grid
         local beat_frac     = endpoint_abs % 1.0
@@ -899,7 +942,7 @@ local function pick_dur_slots(onset_slot, abs_start_slot, grid,
           local snap_slots    = math.floor(beats_to_next / grid + 0.5)
           local snapped       = chosen + snap_slots
           if snapped >= min_slots and snapped <= cap then
-            local snap_prob = (metre - 0.5) * 2.0
+            local snap_prob = (snap_drive - 0.5) * 2.0
             if rng_float() < snap_prob then chosen = snapped end
           end
         end
@@ -911,6 +954,14 @@ local function pick_dur_slots(onset_slot, abs_start_slot, grid,
         local gap = bar_remain_slots - chosen
         if gap > 0 and gap <= min_slots and chosen + gap <= cap then
           chosen = chosen + gap
+        end
+      end
+      -- Low-busyness stretch: bias toward filling the chord block with a
+      -- single sustained note when we're already on a strong beat.
+      if busy <= 0.2 and mw >= 0.55 then
+        local stretch_prob = (0.2 - busy) * 5.0  -- 0..1 across busy 0..0.2
+        if rng_float() < stretch_prob then
+          chosen = math.min(cap, valid[#valid])
         end
       end
       return math.max(min_slots, math.min(cap, chosen))
@@ -1089,9 +1140,17 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
       min_slots, max_slots, remaining_slots
     )
 
-    -- Rest probability — block-start is never a rest (we want the chord
-    -- to be defined on attack), and strong beats rest less often.
-    local rest_p = state.mel_rest_prob
+    -- Rest probability — derived from busyness via the phrase-arc density
+    -- envelope. Sparse settings rest more (and only between phrases);
+    -- dense settings rest rarely. Block-start is never a rest (we want
+    -- the chord to be defined on attack), and strong beats rest less.
+    -- For caller-dur presets (Fractal/Motif) the rhythm is structural,
+    -- so we soften busyness's pull on the rest gate to avoid breaking
+    -- the cell.
+    local density = phrase_arc_density(context, abs_beat)
+    local soft = (state.mel_preset_idx == 7 or state.mel_preset_idx == 8)
+                 and 0.5 or 1.0
+    local rest_p = (1.0 - density) * 35.0 * soft
     if first_onset    then rest_p = 0 end
     if mw >= 0.95     then rest_p = rest_p * 0.25 end
 
@@ -1304,8 +1363,11 @@ local function mel_structured(block_dur, chord_notes, scale_notes, chord_range, 
 
     -- First onset of the block: never a rest; force a chord-tone landing
     -- (voice-led from prev_pitch when possible) so chord changes feel
-    -- intentional rather than incidental.
-    local rest_p = (first and 0) or state.mel_rest_prob
+    -- intentional rather than incidental. Otherwise rest probability is
+    -- driven by the busyness-modulated phrase-arc density.
+    local abs_beat = (ctx_tbl.abs_block_start or 0) + pos
+    local density  = phrase_arc_density(ctx_tbl, abs_beat)
+    local rest_p   = (first and 0) or ((1.0 - density) * 35.0)
 
     if rng_float() * 100 >= rest_p then
       local pitch
@@ -2704,8 +2766,8 @@ local function draw_ui()
   local mpc, mpv = combo_grouped("Preset##melpre", MEL_PRESET_ITEMS, state.mel_preset_idx)
   if mpc then state.mel_preset_idx = mpv; state.mel_live_events=nil end
   reaper.ImGui_SameLine(ctx)
-  local mrestc, mrestv = sslider("Rest%%##mrest", state.mel_rest_prob, 0, 60, 70)
-  if mrestc then state.mel_rest_prob = mrestv; state.mel_live_events=nil end
+  local mbusyc, mbusyv = sslider("Busy##mbusy", state.mel_busyness, 0, 100, 70)
+  if mbusyc then state.mel_busyness = mbusyv; state.mel_live_events=nil end
   reaper.ImGui_SameLine(ctx)
   local mvc, mvv = sslider("Vel##mvel", state.mel_velocity, 1, 127, 65)
   if mvc then state.mel_velocity = mvv; state.mel_live_events=nil end
@@ -2778,6 +2840,14 @@ local function draw_ui()
     state.mel_metre < 75  and "strong — snaps to beat grid" or
     state.mel_metre < 90  and "strict — beats only, sub-beats rare" or
     "locked — onsets on whole beats (min-grid: "..MEL_DUR_NAMES[state.mel_min_dur_idx]..")")
+
+  reaper.ImGui_TextDisabled(ctx, "Busy "..state.mel_busyness.." — "..(
+    state.mel_busyness == 0  and "very sparse — long held notes, occasional rests" or
+    state.mel_busyness < 25  and "sparse — mostly long notes, gentle activity" or
+    state.mel_busyness < 50  and "balanced — mixed lengths, mild ebb & flow" or
+    state.mel_busyness < 75  and "active — shorter notes prevail, arc-shaped clustering" or
+    state.mel_busyness < 100 and "busy — bursts of subdivision around bar/half-bar landmarks" or
+    "very busy — dense subdivision bursts, snapped to quarter-note boundaries"))
 
   -- ── Live Preview ─────────────────────────────────────────────
   reaper.ImGui_SeparatorText(ctx, "Live Preview")
