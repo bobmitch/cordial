@@ -475,6 +475,132 @@ load_preset_qualities(PROGRESSIONS[state.prog_idx], 4)
 state.seed_str = tostring(state.seed)
 
 -- ----------------------------------------------------------------
+--  PROJECT STATE PERSISTENCE
+-- ----------------------------------------------------------------
+-- Scalar state fields that are saved/loaded per-project via SetProjExtState.
+-- When adding a new persistent scalar to `state`, append its key here.
+-- For new array fields, add explicit handling in save/load_proj_state below.
+local PERSIST_KEYS = {
+  "root_idx", "mode_idx", "octave",
+  "prog_idx",
+  -- Chord layer
+  "chord_track_name", "chord_channel", "chord_enabled", "chord_velocity",
+  -- Arp layer
+  "arp_enabled", "arp_track_name", "arp_channel", "arp_rate_idx",
+  "arp_pattern_idx", "arp_octaves", "arp_gate", "arp_velocity",
+  "arp_vel_human", "arp_note_prob", "arp_beat1_prob", "arp_beatn_prob",
+  "arp_beatn_idx", "arp_rigidity",
+  -- Melody layer
+  "mel_enabled", "mel_track_name", "mel_channel", "mel_preset_idx",
+  "mel_min_dur_idx", "mel_max_dur_idx", "mel_velocity", "mel_vel_human",
+  "mel_oct_min", "mel_oct_max", "mel_busyness", "mel_rigidity",
+  "mel_colour", "mel_metre", "mel_render_cycles",
+  -- Bass layer
+  "bass_enabled", "bass_track_name", "bass_channel", "bass_style_idx",
+  "bass_oct", "bass_follow_inv", "bass_velocity", "bass_vel_human",
+  "bass_gate", "bass_approach_prob", "bass_pattern_steps", "bass_pattern_grid_idx",
+  -- Seed / PPQ
+  "seed", "seed_locked", "ppq_per_beat",
+}
+
+local EXT_NS = "cordial"  -- namespace for SetProjExtState
+
+local function arr_to_str(t)
+  local parts = {}
+  for i = 1, #t do parts[i] = tostring(t[i] ~= nil and t[i] or "") end
+  return table.concat(parts, ",")
+end
+
+local function str_to_num_arr(s, n)
+  local t = {}
+  local i = 0
+  for tok in (s..","):gmatch("([^,]*),") do
+    i = i + 1
+    t[i] = tonumber(tok) or 0
+    if i >= n then break end
+  end
+  return t
+end
+
+local function save_proj_state()
+  -- Scalars
+  for _, k in ipairs(PERSIST_KEYS) do
+    reaper.SetProjExtState(0, EXT_NS, k, tostring(state[k]))
+  end
+  -- Arrays
+  local nd = #state.chord_durations
+  reaper.SetProjExtState(0, EXT_NS, "num_chords", tostring(nd))
+  reaper.SetProjExtState(0, EXT_NS, "chord_durations",  arr_to_str(state.chord_durations))
+  reaper.SetProjExtState(0, EXT_NS, "chord_inversions", arr_to_str(state.chord_inversions))
+  -- quality overrides: nil entries serialised as ""
+  local qparts = {}
+  for i = 1, nd do qparts[i] = state.chord_quality_overrides[i] or "" end
+  reaper.SetProjExtState(0, EXT_NS, "chord_quality_overrides", table.concat(qparts, ","))
+  -- custom degrees
+  reaper.SetProjExtState(0, EXT_NS, "custom_degrees_n", tostring(#state.custom_degrees))
+  reaper.SetProjExtState(0, EXT_NS, "custom_degrees",   arr_to_str(state.custom_degrees))
+  -- bass pattern
+  reaper.SetProjExtState(0, EXT_NS, "bass_pattern_notes", arr_to_str(state.bass_pattern_notes))
+end
+
+local function load_proj_state()
+  local ok, val
+  ok, val = reaper.GetProjExtState(0, EXT_NS, "root_idx")
+  if not ok or val == "" then return end  -- nothing saved yet for this project
+
+  -- Scalars
+  for _, k in ipairs(PERSIST_KEYS) do
+    ok, val = reaper.GetProjExtState(0, EXT_NS, k)
+    if ok and val ~= "" then
+      local def = state[k]
+      if type(def) == "number" then
+        state[k] = tonumber(val) or def
+      elseif type(def) == "boolean" then
+        state[k] = (val == "true")
+      else
+        state[k] = val
+      end
+    end
+  end
+
+  -- Arrays
+  ok, val = reaper.GetProjExtState(0, EXT_NS, "num_chords")
+  local nd = (ok and tonumber(val)) or #state.chord_durations
+
+  ok, val = reaper.GetProjExtState(0, EXT_NS, "chord_durations")
+  if ok and val ~= "" then state.chord_durations = str_to_num_arr(val, nd) end
+
+  ok, val = reaper.GetProjExtState(0, EXT_NS, "chord_inversions")
+  if ok and val ~= "" then state.chord_inversions = str_to_num_arr(val, nd) end
+
+  ok, val = reaper.GetProjExtState(0, EXT_NS, "chord_quality_overrides")
+  if ok and val ~= "" then
+    state.chord_quality_overrides = {}
+    local i = 0
+    for tok in (val..","):gmatch("([^,]*),") do
+      i = i + 1
+      state.chord_quality_overrides[i] = (tok ~= "") and tok or nil
+      if i >= nd then break end
+    end
+  end
+
+  ok, val = reaper.GetProjExtState(0, EXT_NS, "custom_degrees_n")
+  local cdn = (ok and tonumber(val)) or #state.custom_degrees
+  ok, val = reaper.GetProjExtState(0, EXT_NS, "custom_degrees")
+  if ok and val ~= "" then state.custom_degrees = str_to_num_arr(val, cdn) end
+
+  ok, val = reaper.GetProjExtState(0, EXT_NS, "bass_pattern_notes")
+  if ok and val ~= "" then
+    state.bass_pattern_notes = str_to_num_arr(val, 8)
+  end
+
+  state.seed_str = tostring(state.seed)
+end
+
+load_proj_state()
+reaper.atexit(save_proj_state)
+
+-- ----------------------------------------------------------------
 --  SEEDED RNG
 -- ----------------------------------------------------------------
 local function rng_seed(s) math.randomseed(s) end
@@ -3281,11 +3407,13 @@ local function draw_ui()
 
   reaper.ImGui_Spacing(ctx)
   if reaper.ImGui_Button(ctx, "Write to Tracks  (at edit cursor)", 240, 28) then
+    save_proj_state()
     write_all()
   end
   reaper.ImGui_SameLine(ctx)
   if reaper.ImGui_Button(ctx, "  KEEP this take  ", 160, 28) then
     state.seed_locked = true
+    save_proj_state()
     write_all()
     state.status_msg = "[KEPT]  "..state.status_msg
   end
