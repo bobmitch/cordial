@@ -309,6 +309,9 @@ local ARP_RATES = {
   {label="1/16",  beats=0.25},
   {label="1/16T", beats=1/6},
   {label="1/32",  beats=0.125},
+  -- Appended to preserve persisted indices in existing projects
+  {label="1/4T",  beats=2/3},
+  {label="1/8T",  beats=1/3},
 }
 local ARP_RATE_NAMES = {}
 for _, r in ipairs(ARP_RATES) do ARP_RATE_NAMES[#ARP_RATE_NAMES+1] = r.label end
@@ -320,6 +323,9 @@ local ACCENT_GRID = {
   {label="1/16",  beats=0.25},
   {label="1/16T", beats=1/6},
   {label="1/32",  beats=0.125},
+  -- Appended to preserve persisted indices in existing projects
+  {label="1/4T",  beats=2/3},
+  {label="1/8T",  beats=1/3},
 }
 local ACCENT_GRID_NAMES = {}
 for _, g in ipairs(ACCENT_GRID) do ACCENT_GRID_NAMES[#ACCENT_GRID_NAMES+1] = g.label end
