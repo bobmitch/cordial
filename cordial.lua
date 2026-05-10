@@ -1636,9 +1636,11 @@ local function mel_strat_phrase(block_dur, chord_notes, scale_notes, chord_range
     if c.is_block_start_slot then return c.block_skeleton or prev end
     -- Phrase-end final-onset breath: at high cadence, occasionally
     -- skip the very last onset so the next phrase can speak fresh.
+    -- Capped at ~40% so even at maximum cadence the breath punctuates
+    -- rather than dominates.
     if c.is_final_onset_of_block and c.is_phrase_end then
       local cadence = (state.mel_cadence or 60) / 100.0
-      if cadence > 0.5 and rng_float() < (cadence - 0.5) * 1.0 then
+      if cadence > 0.5 and rng_float() < (cadence - 0.5) * 0.8 then
         return nil   -- rest
       end
     end
