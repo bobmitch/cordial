@@ -329,7 +329,9 @@ local MEL_PRESETS = {
   "Motif",          -- 8: seed cell repeated with variation
 }
 
-local BASS_STYLES = {"Root", "Root-Fifth", "Walking", "Boogie"}
+local BASS_STYLES = {"Root", "Root-Fifth", "Walking", "Boogie", "Pattern"}
+-- Pattern step note values: 0=rest, 1=root, 2=fifth, 3=oct-up
+local BASS_PAT_LABELS = {"·", "R", "5", "8"}
 
 -- ----------------------------------------------------------------
 --  STATE
@@ -404,6 +406,10 @@ local state = {
   bass_vel_human     = 10,
   bass_gate          = 90,
   bass_approach_prob = 70,         -- Walking: prob (0-100) of chromatic approach on last beat
+  -- Pattern style
+  bass_pattern_steps    = 4,
+  bass_pattern_grid_idx = 2,       -- index into ARP_RATES; default 1/8
+  bass_pattern_notes    = {1,0,1,2, 0,0,0,0},  -- 0=rest,1=root,2=fifth,3=oct
 
   -- Bass live preview
   bass_live_enabled   = false,
@@ -2121,6 +2127,26 @@ local function build_bass_events(chord, chord_dur, next_chord)
       local dur = math.min(half_beat * gate, chord_dur - pos)
       events[#events+1] = {pitch=pattern[(s % 4)+1], pos=pos, dur=dur, vel=bass_pick_vel()}
     end
+  -- ── Pattern ─────────────────────────────────────────────────
+  elseif style == "Pattern" then
+    local grid    = ARP_RATES[state.bass_pattern_grid_idx].beats
+    local steps   = state.bass_pattern_steps
+    local fifth_pc = (land % 12 + 7) % 12
+    local fifth    = (state.bass_oct + 1) * 12 + fifth_pc
+    if fifth < land then fifth = fifth + 12 end
+    local oct_up   = land + 12
+    local pitches  = {land, fifth, oct_up}   -- indexed by note value 1/2/3
+    local step_idx = 0
+    local pos      = 0
+    while pos < chord_dur - 0.001 do
+      local nv  = state.bass_pattern_notes[(step_idx % steps) + 1]
+      local dur = math.min(grid * gate, chord_dur - pos)
+      if nv > 0 then
+        events[#events+1] = {pitch=pitches[nv], pos=pos, dur=dur, vel=bass_pick_vel()}
+      end
+      pos      = pos + grid
+      step_idx = step_idx + 1
+    end
   end
 
   return events
@@ -3143,6 +3169,22 @@ local function draw_ui()
     reaper.ImGui_SameLine(ctx)
     local bac, bav = sslider("Approach%%##bapp", state.bass_approach_prob, 0, 100, 95)
     if bac then state.bass_approach_prob = bav; state.bass_live_events = nil end
+  end
+  if BASS_STYLES[state.bass_style_idx] == "Pattern" then
+    reaper.ImGui_SetNextItemWidth(ctx, 80)
+    local bgrc, bgrv = combo("Grid##bpgrid", ARP_RATE_NAMES, state.bass_pattern_grid_idx)
+    if bgrc then state.bass_pattern_grid_idx = bgrv; state.bass_live_events = nil end
+    reaper.ImGui_SameLine(ctx)
+    local bstc, bstv = sslider("Steps##bpsteps", state.bass_pattern_steps, 1, 8, 60)
+    if bstc then state.bass_pattern_steps = bstv; state.bass_live_events = nil end
+    for i = 1, state.bass_pattern_steps do
+      if i > 1 then reaper.ImGui_SameLine(ctx) end
+      local nv = state.bass_pattern_notes[i]
+      if reaper.ImGui_Button(ctx, BASS_PAT_LABELS[nv+1].."##bpn"..i, 30, 0) then
+        state.bass_pattern_notes[i] = (nv + 1) % 4
+        state.bass_live_events = nil
+      end
+    end
   end
 
   -- ── Live Preview ─────────────────────────────────────────────
