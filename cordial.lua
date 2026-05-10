@@ -515,6 +515,23 @@ local PERSIST_KEYS = {
 
 local EXT_NS = "cordial"  -- namespace for SetProjExtState
 
+-- One-way migration: the old 8-preset melody list collapses to 4.
+--   1 Free / 2 Flowing / 4 Conversational  → 1 Free
+--   3 Structured / 6 Phrase & Answer       → 2 Phrase
+--   7 Fractal / 8 Motif                    → 3 Motif
+--   5 Mechanical                           → 4 Mechanical
+-- Triggered when loading a save that predates mel_cadence (the marker
+-- for the new 4-preset world).
+local MEL_PRESET_MIGRATION = { 1, 1, 2, 1, 4, 2, 3, 3 }
+local function migrate_mel_preset_idx()
+  local v = state.mel_preset_idx
+  if type(v) == "number" and v >= 1 and v <= #MEL_PRESET_MIGRATION then
+    state.mel_preset_idx = MEL_PRESET_MIGRATION[v]
+  else
+    state.mel_preset_idx = 1
+  end
+end
+
 local function arr_to_str(t)
   local parts = {}
   for i = 1, #t do parts[i] = tostring(t[i] ~= nil and t[i] or "") end
@@ -558,6 +575,12 @@ local function load_proj_state()
   ok, val = reaper.GetProjExtState(0, EXT_NS, "root_idx")
   if not ok or val == "" then return end  -- nothing saved yet for this project
 
+  -- Detect a pre-overhaul save by checking for the new mel_cadence key
+  -- *before* the scalar loop overwrites the default. Old saves predate
+  -- the 8→4 melody preset collapse and need preset_idx migration.
+  local _, cad_val = reaper.GetProjExtState(0, EXT_NS, "mel_cadence")
+  local needs_mel_migration = (cad_val == "")
+
   -- Scalars
   for _, k in ipairs(PERSIST_KEYS) do
     ok, val = reaper.GetProjExtState(0, EXT_NS, k)
@@ -572,6 +595,7 @@ local function load_proj_state()
       end
     end
   end
+  if needs_mel_migration then migrate_mel_preset_idx() end
 
   -- Arrays
   ok, val = reaper.GetProjExtState(0, EXT_NS, "num_chords")
@@ -1280,21 +1304,19 @@ local function build_skeleton(progression, phrases, prev_skeleton_pitch)
 end
 
 -- 3. SURFACE WALKER ──────────────────────────────────────────────
--- Walk one onset from prev_pitch toward target_pitch given the number
--- of onsets remaining before the landing. Stepwise by default; in the
--- final approach an idiomatic figure (leading tone, scale-step from
--- above) is selected with strength scaled by cadence and amplified at
--- phrase ends.
-local function surface_step(prev_pitch, target_pitch, slots_to_target,
-                            scale_notes, chord_pcs, is_phrase_end)
+-- Walk one onset from prev_pitch toward target_pitch. Stepwise by
+-- default. On the *final* onset before a chord-change landing an
+-- idiomatic figure (leading tone, scale-step from above/below) takes
+-- over with strength scaled by cadence and amplified at phrase ends.
+--
+--   is_final_onset = the next onset will be on the new chord (target)
+--   is_phrase_end  = that next onset is also the start of a new phrase
+local function surface_step(prev_pitch, target_pitch, scale_notes,
+                            is_final_onset, is_phrase_end)
   local cadence = (state.mel_cadence or 60) / 100.0
   if #scale_notes == 0 then return prev_pitch end
 
-  -- Final-approach figure: this is THE moment cadence shapes the line.
-  if slots_to_target <= 1 then
-    return target_pitch
-  end
-  if slots_to_target == 2 then
+  if is_final_onset and target_pitch then
     local approach_prob = is_phrase_end and (0.4 + 0.6 * cadence)
                                         or (0.2 + 0.5 * cadence)
     if rng_float() < approach_prob then
@@ -1312,23 +1334,23 @@ local function surface_step(prev_pitch, target_pitch, slots_to_target,
         return down
       end
     end
+    -- Approach declined: fall through to general walk biased at target.
   end
 
-  -- General walk: aim toward the target, distance / slots ≈ step size.
-  local idx_prev   = nearest_idx(scale_notes, prev_pitch)
-  local idx_target = nearest_idx(scale_notes, target_pitch)
-  if idx_prev == idx_target then
-    -- Already at the target pitch class — neighbour figure to keep
-    -- the line breathing rather than repeating.
-    local dir = (rng_float() < 0.5) and 1 or -1
-    return diatonic_step(scale_notes, prev_pitch, dir)
+  -- General walk: aim toward the target with mostly stepwise motion.
+  local idx_prev = nearest_idx(scale_notes, prev_pitch)
+  local idx_targ = target_pitch and nearest_idx(scale_notes, target_pitch) or idx_prev
+  local dir
+  if idx_targ == idx_prev then
+    dir = (rng_float() < 0.5) and 1 or -1   -- neighbour figure
+  else
+    dir = (idx_targ > idx_prev) and 1 or -1
   end
-  local dir      = (idx_target > idx_prev) and 1 or -1
-  local distance = math.abs(idx_target - idx_prev)
-  local avg      = distance / math.max(1, slots_to_target)
-  local step     = math.max(1, math.floor(avg + rng_float()))
-  -- Occasional reverse step for a neighbour figure when there's room.
-  if rng_float() < 0.15 and slots_to_target > 3 then dir = -dir end
+  -- Step size: mostly 1, occasional 2 (third), very occasional 3.
+  local r = rng_float()
+  local step = (r < 0.75) and 1 or (r < 0.95) and 2 or 3
+  -- Small chance of reverse step for a passing/neighbour shape.
+  if rng_float() < 0.15 then dir = -dir end
   local idx = math.max(1, math.min(#scale_notes, idx_prev + dir * step))
   return scale_notes[idx]
 end
@@ -1458,11 +1480,19 @@ local function mel_max_beats() return MEL_DURATIONS[state.mel_max_dur_idx].beats
 --     - nil                  : skip this onset (treated as a rest)
 --
 -- Context keys set per onset (read-only for pitch_fn):
---   ctx.is_block_start_slot     true on the very first onset of the block
---   ctx.metric_weight_here      0..1 metrical weight at this onset
---   ctx.land_chord_tone_p       0..1 desired chord-tone landing probability
---   ctx.tension_here            0..1 phrase-arc tension at this onset
---   ctx.scale_pcs / chord_pcs   pitch-class sets (cached for convenience)
+--   ctx.is_block_start_slot       true on the very first onset of the block
+--   ctx.is_final_onset_of_block   true if the next onset will land on the
+--                                 next chord (i.e. this is the last note
+--                                 inside the current chord block)
+--   ctx.metric_weight_here        0..1 metrical weight at this onset
+--   ctx.land_chord_tone_p         0..1 desired chord-tone landing probability
+--   ctx.tension_here              0..1 phrase-arc tension at this onset
+--   ctx.scale_pcs / chord_pcs     pitch-class sets (cached for convenience)
+--
+-- Context keys set per block (by build_melody_cycle, before this is called):
+--   ctx.block_skeleton    structural pitch this block must land on (chord tone)
+--   ctx.next_skeleton     structural pitch the next block will land on
+--   ctx.is_phrase_end     true if the next block starts a new phrase
 local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
                                pitch_fn, context)
   local grid      = mel_min_beats()
@@ -1522,16 +1552,19 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
       min_slots, max_slots, remaining_slots
     )
 
+    -- Walker context: this onset is the *last* one inside the block if
+    -- placing it now exhausts the remaining slots. Generators consult
+    -- this when choosing a final-approach figure toward next_skeleton.
+    context.is_final_onset_of_block = (slot + dur_slots >= block_slots)
+
     -- Rest probability — derived from busyness via the phrase-arc density
     -- envelope. Sparse settings rest more (and only between phrases);
     -- dense settings rest rarely. Block-start is never a rest (we want
     -- the chord to be defined on attack), and strong beats rest less.
-    -- For caller-dur presets (Fractal/Motif) the rhythm is structural,
-    -- so we soften busyness's pull on the rest gate to avoid breaking
-    -- the cell.
+    -- For caller-dur presets (Motif) the rhythm is structural, so we
+    -- soften busyness's pull on the rest gate to avoid breaking the cell.
     local density = phrase_arc_density(context, abs_beat)
-    local soft = (state.mel_preset_idx == 7 or state.mel_preset_idx == 8)
-                 and 0.5 or 1.0
+    local soft = (state.mel_preset_idx == 3) and 0.5 or 1.0  -- Motif
     local rest_p = (1.0 - density) * 35.0 * soft
     if first_onset    then rest_p = 0 end
     if mw >= 0.95     then rest_p = rest_p * 0.25 end
@@ -1559,28 +1592,26 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
                                                    math.min(caller_dur, remaining_slots)))
         end
 
-        -- Cross-block voice leading: at the first onset of a non-first
-        -- block, prefer the pre-staged voice-led chord tone unless the
-        -- generator already returned a chord tone close to it.
-        if first_onset and context.voice_led_target then
-          local vt = context.voice_led_target
-          if not is_chord_tone(pitch, chord_pcs) or math.abs(pitch - vt) > 4 then
-            -- Honour the voice-led target on strong landings.
-            if rng_float() < math.max(0.7, landing_p) then
-              pitch = vt
-            end
+        -- First onset of every block lands on the structural skeleton
+        -- pitch — voice-led across the whole progression by build_skeleton.
+        -- Generators may opt out by returning a chord tone close to the
+        -- skeleton themselves; otherwise the skeleton wins.
+        if first_onset and context.block_skeleton then
+          local sk = context.block_skeleton
+          if not is_chord_tone(pitch, chord_pcs) or math.abs(pitch - sk) > 4 then
+            pitch = sk
           end
         end
 
-        -- Chord-tone landing enforcement: with probability landing_p, snap
-        -- a non-chord-tone result to the nearest chord tone. This is an
-        -- additional gate on top of apply_rigidity.
-        if landing_p > 0 and not is_chord_tone(pitch, chord_pcs)
+        -- Chord-tone landing enforcement on strong beats inside the block:
+        -- with probability landing_p (cadence-driven), snap a non-chord
+        -- result to the nearest chord tone.
+        if not first_onset and landing_p > 0
+           and not is_chord_tone(pitch, chord_pcs)
            and rng_float() < landing_p then
           pitch = nearest_chord_tone(pitch, chord_range)
         end
 
-        pitch = apply_rigidity(pitch, chord_range)
         pitch = math.max(state.mel_oct_min * 12,
                 math.min((state.mel_oct_max + 1) * 12 - 1, pitch))
 
@@ -2157,10 +2188,180 @@ local function mel_motif(block_dur, chord_notes, scale_notes, chord_range, ctx_t
   return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
 end
 
--- Dispatcher
+-- ============================================================
+--  STRATEGY GENERATORS  (Phase 2)
+--
+--  Four presets, each implemented as a thin pitch_fn on top of
+--  mel_fill_block + the shared planner / skeleton / surface walker.
+--  Identity per preset:
+--
+--    Free       – wandering line, surface walker aims at landings.
+--    Phrase     – sentence form: presentation → continuation → cadence.
+--                 Stronger phrase-end articulation; same surface walker.
+--    Motif      – develops a small cell. Cell transposes to the
+--                 skeleton pitch of every chord block; periodic
+--                 inversion / retrograde / fragmentation.
+--    Mechanical – honest fixed-interval pattern. Lands the skeleton
+--                 at block starts and lets cadence soften the final
+--                 approach toward each chord change.
+-- ============================================================
+
+-- ── 1. FREE ────────────────────────────────────────────────────
+local function mel_strat_free(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    if c.is_block_start_slot then return c.block_skeleton or prev end
+    return surface_step(prev, c.next_skeleton, sn,
+                        c.is_final_onset_of_block, c.is_phrase_end)
+  end
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+end
+
+-- ── 2. PHRASE ──────────────────────────────────────────────────
+-- Same surface logic as Free, but biases the rest gate toward leaving
+-- a breath at the very last onset of a phrase-end block when cadence
+-- is high — the line says something, then breathes before the answer.
+local function mel_strat_phrase(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    if c.is_block_start_slot then return c.block_skeleton or prev end
+    -- Phrase-end final-onset breath: at high cadence, occasionally
+    -- skip the very last onset so the next phrase can speak fresh.
+    if c.is_final_onset_of_block and c.is_phrase_end then
+      local cadence = (state.mel_cadence or 60) / 100.0
+      if cadence > 0.5 and rng_float() < (cadence - 0.5) * 1.0 then
+        return nil   -- rest
+      end
+    end
+    return surface_step(prev, c.next_skeleton, sn,
+                        c.is_final_onset_of_block, c.is_phrase_end)
+  end
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+end
+
+-- ── 3. MOTIF ───────────────────────────────────────────────────
+-- A short cell (3–5 notes) with its own rhythm and a singable interval
+-- profile. On every chord change the cell is diatonically transposed so
+-- its first note lands on the skeleton pitch of the new chord — the
+-- shared infrastructure already guarantees that lands at block start;
+-- here we just make the rest of the cell follow. Periodic variation:
+-- inversion, retrograde, or fragmentation every few blocks.
+local function mel_strat_motif(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  local grid       = mel_min_beats()
+  local min_slots  = 1
+  local max_slots  = math.floor(mel_max_beats() / grid + 0.5)
+
+  -- Build the seed cell once per progression.
+  if not ctx_tbl.motif_cell then
+    local cell_len      = rng_int(3, 5)
+    local cell          = {}
+    local interval_pool = { -2, -1, -1, -1, 0, 1, 1, 1, 2 }  -- mostly steps
+    local one_beat_slots = math.max(min_slots, math.floor(1.0 / grid + 0.5))
+    local rhythm_pool    = { 1, 1, 2, 2, one_beat_slots,
+                             math.max(1, math.floor(one_beat_slots / 2)) }
+    -- Filter rhythm_pool to valid range
+    local rh = {}
+    for _, v in ipairs(rhythm_pool) do
+      if v >= min_slots and v <= max_slots then rh[#rh+1] = v end
+    end
+    if #rh == 0 then rh = { min_slots } end
+    -- Cell stored as scale-step offsets from its first note + dur in slots.
+    local idx_off = 0
+    cell[1] = { idx_offset = 0, dur_slots = rh[rng_int(1, #rh)] }
+    for i = 2, cell_len do
+      idx_off = idx_off + interval_pool[rng_int(1, #interval_pool)]
+      cell[i] = { idx_offset = idx_off, dur_slots = rh[rng_int(1, #rh)] }
+    end
+    ctx_tbl.motif_cell    = cell
+    ctx_tbl.motif_ci      = 1
+    ctx_tbl.motif_block_n = 0
+    ctx_tbl.motif_invert  = false
+    ctx_tbl.motif_retro   = false
+  end
+
+  -- Per chord-block: reset cursor, recompute the block's anchor index
+  -- (the scale-step idx of the skeleton pitch).
+  if ctx_tbl.motif_block_for ~= ctx_tbl.abs_block_start then
+    ctx_tbl.motif_ci        = 1
+    ctx_tbl.motif_block_for = ctx_tbl.abs_block_start
+    ctx_tbl.motif_anchor_idx = nearest_idx(scale_notes,
+      ctx_tbl.block_skeleton or scale_notes[math.ceil(#scale_notes/2)])
+    ctx_tbl.motif_block_n   = (ctx_tbl.motif_block_n or 0) + 1
+    -- Light variation every 4 blocks: invert intervals OR retrograde.
+    if ctx_tbl.motif_block_n % 4 == 0 then
+      if rng_float() < 0.5 then
+        ctx_tbl.motif_invert = not ctx_tbl.motif_invert
+      else
+        ctx_tbl.motif_retro = not ctx_tbl.motif_retro
+      end
+    end
+  end
+
+  local cell = ctx_tbl.motif_cell
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    -- On the very last onset of a phrase-end block at high cadence,
+    -- the cadence injection takes over: replace the cell's note with a
+    -- final-approach figure aimed at the next skeleton.
+    if c.is_final_onset_of_block and c.is_phrase_end and c.next_skeleton then
+      local cadence = (state.mel_cadence or 60) / 100.0
+      if cadence > 0.5 and rng_float() < (cadence - 0.3) then
+        return surface_step(prev, c.next_skeleton, sn, true, true)
+      end
+    end
+    local ci  = c.motif_ci or 1
+    local len = #cell
+    local read_i = c.motif_retro and (len - ci + 1) or ci
+    local entry  = cell[read_i]
+    local off    = entry.idx_offset
+    if c.motif_invert then off = -off end
+    local anchor = c.motif_anchor_idx or nearest_idx(sn, prev)
+    local idx    = math.max(1, math.min(#sn, anchor + off))
+    c.motif_ci   = (ci % len) + 1
+    return { pitch = sn[idx], dur_slots = entry.dur_slots }
+  end
+
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+end
+
+-- ── 4. MECHANICAL ──────────────────────────────────────────────
+-- Strict alternating ±N scale-step pattern (interval seed-chosen,
+-- seed-stable). First onset of every block snaps to the skeleton; the
+-- final onset before a chord change softens toward the next landing
+-- with strength scaled by cadence.
+local function mel_strat_mechanical(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  if not ctx_tbl.mech_interval then
+    local intervals = {2, 3, 4, 5}
+    ctx_tbl.mech_interval  = intervals[rng_int(1, #intervals)]
+    ctx_tbl.mech_direction = 1
+  end
+  local function pitch_fn(pos, bdur, cn, sn, prev, c)
+    if c.is_block_start_slot then return c.block_skeleton or prev end
+    -- Cadence-softened final approach into the next chord.
+    if c.is_final_onset_of_block and c.next_skeleton then
+      local cadence = (state.mel_cadence or 60) / 100.0
+      if rng_float() < cadence then
+        return surface_step(prev, c.next_skeleton, sn, true, c.is_phrase_end)
+      end
+    end
+    local idx  = nearest_idx(sn, prev)
+    local step = c.mech_interval * c.mech_direction
+    local new_idx = idx + step
+    if new_idx > #sn then
+      c.mech_direction = -1
+      new_idx = math.max(1, idx - c.mech_interval)
+    elseif new_idx < 1 then
+      c.mech_direction = 1
+      new_idx = math.min(#sn, idx + c.mech_interval)
+    end
+    return sn[math.max(1, math.min(#sn, new_idx))]
+  end
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
+end
+
+-- Dispatcher (Phase 2: 4 strategy presets).
 local MEL_GEN_FNS = {
-  mel_free, mel_flowing, mel_structured, mel_conversational,
-  mel_mechanical, mel_phrase_answer, mel_fractal, mel_motif,
+  mel_strat_free,        -- 1
+  mel_strat_phrase,      -- 2
+  mel_strat_motif,       -- 3
+  mel_strat_mechanical,  -- 4
 }
 
 -- Build one cycle of the progression, appending to `events` and mutating
@@ -2170,7 +2371,7 @@ local MEL_GEN_FNS = {
 -- Returns the absolute beat where this cycle ended.
 local function build_melody_cycle(progression, context, events, cycle_offset)
   apply_cadence_to_legacy()
-  local gen_fn = MEL_GEN_FNS[state.mel_preset_idx] or mel_free
+  local gen_fn = MEL_GEN_FNS[state.mel_preset_idx] or MEL_GEN_FNS[1]
   local abs_pos = cycle_offset
 
   -- Phrase-arc tension repeats per cycle: each progression pass arcs from
@@ -2178,6 +2379,21 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
   local total_beats = 0
   for _, ch in ipairs(progression) do total_beats = total_beats + ch.duration end
   phrase_arc_init(context, total_beats, cycle_offset)
+
+  -- Plan phrases for this cycle and build a structural skeleton: one
+  -- voice-led chord tone per chord block, shaped by the per-phrase
+  -- contour. The first onset of each block lands on its skeleton pitch;
+  -- the surface walker aims at the *next* skeleton pitch through the
+  -- block's interior.
+  local phrases  = plan_phrases(progression, state.timesig_num)
+  local skeleton = build_skeleton(progression, phrases,
+                                  context.last_skeleton_pitch
+                                  or context.prev_pitch)
+  context.phrases  = phrases
+  context.skeleton = skeleton
+  -- Mark which block_idx is the LAST block of its phrase (= a phrase end).
+  local phrase_end_block = {}
+  for _, ph in ipairs(phrases) do phrase_end_block[ph.end_block] = true end
 
   for ci, ch in ipairs(progression) do
     local scale_notes  = scale_notes_in_range()
@@ -2187,17 +2403,14 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
     else
       context.abs_block_start = abs_pos
       context.chord_meta      = ch
-      -- "First block" gates voice-leading: only true on the very first
-      -- block of the very first cycle, when there's no prior pitch to
-      -- lead from. Cycle 2's first chord must voice-lead from cycle 1's
-      -- last pitch.
       context.is_first_block  = (cycle_offset == 0 and ci == 1)
-
-      if context.prev_pitch and not context.is_first_block then
-        context.voice_led_target = voice_lead_to_chord(context.prev_pitch, chord_range)
-      else
-        context.voice_led_target = nil
-      end
+      context.block_idx       = ci
+      context.block_skeleton  = skeleton[ci]
+      -- next_skeleton: target the surface walker aims at through this
+      -- block. At progression end we resolve to the current skeleton
+      -- (a settled close) — cycle wrap will pick up fresh next time.
+      context.next_skeleton   = skeleton[ci + 1] or skeleton[ci]
+      context.is_phrase_end   = phrase_end_block[ci] or false
 
       local block_evs = gen_fn(ch.duration, ch.notes, scale_notes, chord_range, context)
       for _, ev in ipairs(block_evs) do
@@ -2211,6 +2424,10 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
       abs_pos = abs_pos + ch.duration
     end
   end
+
+  -- Save final skeleton pitch so the next cycle's skeleton voice-leads
+  -- from where this one ended.
+  context.last_skeleton_pitch = skeleton[#progression]
 
   return abs_pos
 end
@@ -2909,6 +3126,10 @@ local function load_settings_from_file()
     if k then data[k] = v end
   end
   f:close()
+  -- Detect pre-overhaul saves (no mel_cadence key) before the loop
+  -- overwrites the default — old saves need the 8→4 preset migration.
+  local needs_mel_migration = (data["mel_cadence"] == nil
+                               or data["mel_cadence"] == "")
   for _, k in ipairs(PERSIST_KEYS) do
     local val = data[k]
     if val and val ~= "" then
@@ -2922,6 +3143,7 @@ local function load_settings_from_file()
       end
     end
   end
+  if needs_mel_migration then migrate_mel_preset_idx() end
   local nd = tonumber(data["num_chords"]) or #state.chord_durations
   local val = data["chord_durations"]
   if val and val ~= "" then state.chord_durations = str_to_num_arr(val, nd) end
@@ -3243,14 +3465,10 @@ end
 
 -- Melody preset items grouped
 local MEL_PRESET_ITEMS = {
-  {label="Free",            group="Organic"},
-  {label="Flowing",         group="Organic"},
-  {label="Structured",      group="Organic"},
-  {label="Conversational",  group="Organic"},
-  {label="Mechanical",      group="Rule-based"},
-  {label="Phrase & Answer", group="Compositional"},
-  {label="Fractal",         group="Compositional"},
-  {label="Motif",           group="Compositional"},
+  {label="Free",       group="Strategy"},
+  {label="Phrase",     group="Strategy"},
+  {label="Motif",      group="Strategy"},
+  {label="Mechanical", group="Strategy"},
 }
 
 -- Chord quality items grouped
