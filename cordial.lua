@@ -456,15 +456,9 @@ local function rng_int(a,b) return math.random(a,b) end
 --  TIME SIGNATURE HELPERS
 -- ----------------------------------------------------------------
 local function get_timesig_at(proj_time)
-  local num, denom = 4, 4
-  local n = reaper.CountTempoTimeSigMarkers(0)
-  for i = 0, n-1 do
-    local ok, mtime, _, _, tnum, tdenom = reaper.GetTempoTimeSigMarker(0, i)
-    if ok and mtime <= proj_time then
-      if tnum  > 0 then num   = tnum  end
-      if tdenom > 0 then denom = tdenom end
-    end
-  end
+  local num, denom = reaper.TimeMap_GetTimeSigAtTime(0, proj_time)
+  if not num or num < 1 then num = 4 end
+  if not denom or denom < 1 then denom = 4 end
   return num, denom
 end
 local function get_timesig_at_cursor()  return get_timesig_at(reaper.GetCursorPosition()) end
