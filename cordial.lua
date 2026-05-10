@@ -381,9 +381,12 @@ local state = {
   mel_oct_min      = 4,          -- minimum octave for melody
   mel_oct_max      = 5,          -- maximum octave for melody
   mel_busyness     = 45,         -- 0=sparse/long-held, 100=dense/clustered bursts
-  mel_rigidity     = 30,         -- 0=chord tones only, 100=full scale (post-filter)
-  mel_colour       = 0,          -- 0=scale only, 100=chromatic passing tones allowed
-  mel_metre        = 50,         -- 0=free (no beat awareness), 100=strong beat enforcement
+  mel_cadence      = 60,         -- 0=free wander, 100=textbook cadences w/ phrase grammar
+  -- Legacy params kept for the Phase 1 bridge; derived from mel_cadence
+  -- each generation pass. Removed from the UI; will be deleted in Phase 3.
+  mel_rigidity     = 100,        -- always 100 in new world (no post-filter snap)
+  mel_colour       = 0,          -- derived from mel_cadence
+  mel_metre        = 50,         -- derived from mel_cadence
   mel_render_cycles = 4,         -- offline write: number of progression cycles to render
 
   -- Melody live preview
@@ -498,8 +501,8 @@ local PERSIST_KEYS = {
   -- Melody layer
   "mel_enabled", "mel_track_name", "mel_channel", "mel_preset_idx",
   "mel_min_dur_idx", "mel_max_dur_idx", "mel_velocity", "mel_vel_human",
-  "mel_oct_min", "mel_oct_max", "mel_busyness", "mel_rigidity",
-  "mel_colour", "mel_metre", "mel_render_cycles",
+  "mel_oct_min", "mel_oct_max", "mel_busyness", "mel_cadence",
+  "mel_render_cycles",
   -- Bass layer
   "bass_enabled", "bass_track_name", "bass_channel", "bass_style_idx",
   "bass_oct", "bass_follow_inv", "bass_velocity", "bass_vel_human",
@@ -931,12 +934,17 @@ end
 -- ----------------------------------------------------------------
 local function chord_tone_landing_prob(is_block_start, metric_weight, tension)
   tension = tension or 0
+  -- Cadence drives commitment to harmonic landings. At 0 the line is a
+  -- free wander; at 100 every block start and downbeat strongly prefers
+  -- a chord tone. Per-position probabilities interpolate from a low floor
+  -- (cadence=0) to today's strong defaults (cadence=100).
+  local cadence = (state.mel_cadence or 60) / 100.0
   local p = 0
-  if is_block_start         then p = math.max(p, 0.95) end
-  if metric_weight >= 0.95  then p = math.max(p, 0.85) end   -- downbeat
-  if metric_weight >= 0.55  then p = math.max(p, 0.55) end   -- mid-bar
-  if metric_weight >= 0.30  then p = math.max(p, 0.30) end   -- whole beat
-  -- Tension relaxes the rule by up to ~40%.
+  if is_block_start         then p = math.max(p, 0.20 + 0.75 * cadence) end
+  if metric_weight >= 0.95  then p = math.max(p, 0.10 + 0.75 * cadence) end -- downbeat
+  if metric_weight >= 0.55  then p = math.max(p, 0.05 + 0.50 * cadence) end -- mid-bar
+  if metric_weight >= 0.30  then p = math.max(p,        0.30 * cadence) end -- whole beat
+  -- Tension still relaxes the rule by up to ~40% so the arc can climb away.
   p = p * (1.0 - 0.4 * tension)
   return p
 end
@@ -1157,6 +1165,218 @@ local function apply_rigidity(pitch, chord_notes_range)
     return nearest_chord_tone(pitch, chord_notes_range)
   end
   return pitch
+end
+
+-- ============================================================
+--  PHRASE PLANNER / SKELETON / SURFACE WALKER / CADENCE FIGURES
+--
+--  Shared melody infrastructure used by the new generator strategies
+--  (Phase 2 will wire generators on top of these). The flow is:
+--
+--    plan_phrases   → groups the progression into musical phrases,
+--                     each with a contour shape.
+--    build_skeleton → picks one structural tone per chord block,
+--                     voice-led across the phrase and shaped by the
+--                     contour. This is the line's spine.
+--    surface_step   → walks one onset toward the next structural tone,
+--                     with target-aware approach figures near a landing.
+--    inject_cadence_figure
+--                   → at phrase ends, rewrites the final approach so
+--                     it's an idiomatic figure (leading-tone, 2̂→1̂).
+--
+--  Strength scales with state.mel_cadence (0 = free wander, 100 =
+--  textbook cadences). Random choices flow through rng_float() to
+--  preserve the seed contract.
+-- ============================================================
+
+-- 1. PHRASE PLANNER ──────────────────────────────────────────────
+-- Group the progression into ~4-bar phrases (absorbing any remainder
+-- into the final phrase). Each phrase carries a contour shape used by
+-- skeleton selection. The contour cycles deterministically so phrase 1
+-- and phrase 2 don't have the same shape — this is what gives the line
+-- its sense of question/answer.
+local PHRASE_CONTOURS = {"arch", "descend", "ascend", "valley"}
+
+local function plan_phrases(progression, bar_beats)
+  local target_phrase_beats = 4 * (bar_beats or state.timesig_num)
+  local phrases = {}
+  local cur = { start_block = 1, end_block = 0, beats = 0 }
+  for i, ch in ipairs(progression) do
+    cur.beats     = cur.beats + ch.duration
+    cur.end_block = i
+    if cur.beats >= target_phrase_beats - 0.001 then
+      cur.contour = PHRASE_CONTOURS[((#phrases) % #PHRASE_CONTOURS) + 1]
+      phrases[#phrases+1] = cur
+      cur = { start_block = i+1, end_block = 0, beats = 0 }
+    end
+  end
+  if cur.start_block <= #progression then
+    cur.end_block = #progression
+    cur.contour   = PHRASE_CONTOURS[((#phrases) % #PHRASE_CONTOURS) + 1]
+    phrases[#phrases+1] = cur
+  end
+  -- Fill in absolute beat positions.
+  local abs = 0
+  for _, ph in ipairs(phrases) do
+    ph.abs_start = abs
+    for j = ph.start_block, ph.end_block do
+      abs = abs + progression[j].duration
+    end
+    ph.abs_end = abs
+  end
+  return phrases
+end
+
+-- Phrase contour height at relative position t∈[0,1]. 0 = low, 1 = high.
+local function contour_height(contour, t)
+  if contour == "arch"    then return math.sin(t * math.pi) end
+  if contour == "valley"  then return 1 - math.sin(t * math.pi) end
+  if contour == "ascend"  then return t end
+  if contour == "descend" then return 1 - t end
+  return 0.5
+end
+
+-- 2. SKELETON BUILDER ────────────────────────────────────────────
+-- One structural tone per chord block, voice-led across the whole
+-- progression and shaped by each phrase's contour. Returns an array
+-- indexed by block_idx.
+local function build_skeleton(progression, phrases, prev_skeleton_pitch)
+  local skeleton = {}
+  local prev = prev_skeleton_pitch
+  for _, ph in ipairs(phrases) do
+    local n_blocks = ph.end_block - ph.start_block + 1
+    for offs = 0, n_blocks - 1 do
+      local bi          = ph.start_block + offs
+      local ch          = progression[bi]
+      local chord_range = chord_notes_in_range(ch.notes)
+      if #chord_range == 0 then
+        skeleton[bi] = prev or 60
+      else
+        local t        = (n_blocks > 1) and (offs / (n_blocks - 1)) or 0.5
+        local h        = contour_height(ph.contour, t)
+        local lo, hi   = chord_range[1], chord_range[#chord_range]
+        local height_p = lo + h * (hi - lo)
+        local pick     = nearest_chord_tone(height_p, chord_range)
+        if prev then
+          -- Blend voice-leading distance with contour height: the line
+          -- wants to step (small interval to prev) AND aim at the
+          -- contour's target pitch. Equal weight produces gently arcing
+          -- but always-singable spines.
+          local best, best_score = pick, math.huge
+          for _, n in ipairs(chord_range) do
+            local lead_d   = math.abs(n - prev)
+            local height_d = math.abs(n - height_p)
+            local score    = lead_d + height_d * 0.5
+            if score < best_score then best, best_score = n, score end
+          end
+          pick = best
+        end
+        skeleton[bi] = pick
+        prev = pick
+      end
+    end
+  end
+  return skeleton
+end
+
+-- 3. SURFACE WALKER ──────────────────────────────────────────────
+-- Walk one onset from prev_pitch toward target_pitch given the number
+-- of onsets remaining before the landing. Stepwise by default; in the
+-- final approach an idiomatic figure (leading tone, scale-step from
+-- above) is selected with strength scaled by cadence and amplified at
+-- phrase ends.
+local function surface_step(prev_pitch, target_pitch, slots_to_target,
+                            scale_notes, chord_pcs, is_phrase_end)
+  local cadence = (state.mel_cadence or 60) / 100.0
+  if #scale_notes == 0 then return prev_pitch end
+
+  -- Final-approach figure: this is THE moment cadence shapes the line.
+  if slots_to_target <= 1 then
+    return target_pitch
+  end
+  if slots_to_target == 2 then
+    local approach_prob = is_phrase_end and (0.4 + 0.6 * cadence)
+                                        or (0.2 + 0.5 * cadence)
+    if rng_float() < approach_prob then
+      -- Leading-tone (chromatic) on strong phrase-ending cadences.
+      if is_phrase_end and cadence > 0.5
+         and rng_float() < (cadence - 0.3) then
+        return leading_tone_to(target_pitch)
+      end
+      -- Otherwise diatonic step from whichever side is closer to prev.
+      local up   = diatonic_step(scale_notes, target_pitch, 1)
+      local down = diatonic_step(scale_notes, target_pitch, -1)
+      if math.abs(up - prev_pitch) <= math.abs(down - prev_pitch) then
+        return up
+      else
+        return down
+      end
+    end
+  end
+
+  -- General walk: aim toward the target, distance / slots ≈ step size.
+  local idx_prev   = nearest_idx(scale_notes, prev_pitch)
+  local idx_target = nearest_idx(scale_notes, target_pitch)
+  if idx_prev == idx_target then
+    -- Already at the target pitch class — neighbour figure to keep
+    -- the line breathing rather than repeating.
+    local dir = (rng_float() < 0.5) and 1 or -1
+    return diatonic_step(scale_notes, prev_pitch, dir)
+  end
+  local dir      = (idx_target > idx_prev) and 1 or -1
+  local distance = math.abs(idx_target - idx_prev)
+  local avg      = distance / math.max(1, slots_to_target)
+  local step     = math.max(1, math.floor(avg + rng_float()))
+  -- Occasional reverse step for a neighbour figure when there's room.
+  if rng_float() < 0.15 and slots_to_target > 3 then dir = -dir end
+  local idx = math.max(1, math.min(#scale_notes, idx_prev + dir * step))
+  return scale_notes[idx]
+end
+
+-- 4. CADENCE FIGURE INJECTOR ─────────────────────────────────────
+-- Optionally rewrite the very last note of a phrase so it's an
+-- idiomatic approach to the next phrase's landing pitch. Operates in
+-- place on the events list. Strength scales with cadence and is
+-- stronger for full cadences (phrase end → phrase start) than for
+-- internal chord-block boundaries.
+local function inject_cadence_figure(events, target_pitch, scale_notes,
+                                      is_full_cadence)
+  if not events or #events == 0 then return end
+  local cadence = (state.mel_cadence or 60) / 100.0
+  if cadence < 0.3 then return end
+  -- Find the last non-rest event in the phrase
+  local last_i
+  for i = #events, 1, -1 do
+    if not events[i].is_rest then last_i = i; break end
+  end
+  if not last_i then return end
+  local last = events[last_i]
+  -- If the last note IS the target landing, leave it alone.
+  if last.pitch == target_pitch then return end
+  local strength = (cadence - 0.3) / 0.7
+  if rng_float() > strength then return end
+  -- Full cadence (phrase boundary): leading-tone is the textbook figure.
+  -- Internal cadence: diatonic step from above is gentler.
+  if is_full_cadence and rng_float() < cadence then
+    last.pitch = leading_tone_to(target_pitch)
+  else
+    last.pitch = diatonic_step(scale_notes, target_pitch, 1)
+  end
+end
+
+-- 5. CADENCE → LEGACY-PARAM BRIDGE ───────────────────────────────
+-- Phase-1 stopgap: existing generators still consult mel_metre and
+-- mel_colour as separate knobs. Until Phase 2 rewrites them on top of
+-- the planner/skeleton/walker layer, derive those values from the
+-- single cadence knob each generation pass so the UI's behaviour is
+-- coherent. mel_rigidity is forced to 100 (post-filter disabled) —
+-- chord-tone landings now flow through chord_tone_landing_prob, which
+-- already reads cadence directly.
+local function apply_cadence_to_legacy()
+  local c = (state.mel_cadence or 60) / 100.0
+  state.mel_metre    = math.floor(c * 80)
+  state.mel_colour   = math.floor(c * 70)
+  state.mel_rigidity = 100
 end
 
 -- ----------------------------------------------------------------
@@ -1949,6 +2169,7 @@ local MEL_GEN_FNS = {
 -- cell etc.) so the RNG stream and musical state continue smoothly.
 -- Returns the absolute beat where this cycle ended.
 local function build_melody_cycle(progression, context, events, cycle_offset)
+  apply_cadence_to_legacy()
   local gen_fn = MEL_GEN_FNS[state.mel_preset_idx] or mel_free
   local abs_pos = cycle_offset
 
@@ -3346,38 +3567,19 @@ local function draw_ui()
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_TextDisabled(ctx, "octave range")
 
-  -- Rigidity + Colour + Metre
-  local mrigc, mrigv = sslider("Rigidity##mrig", state.mel_rigidity, 0, 100, 130)
-  if mrigc then state.mel_rigidity = mrigv; state.mel_live_events=nil end
-  reaper.ImGui_SameLine(ctx)
-  -- apply_rigidity snaps non-chord tones with prob (1 - rigidity/100), and
-  -- stops snapping entirely only at 100. Label the slider accordingly.
-  local mrlabels = {"chord tones only","mostly chord, hint of scale","chord-leaning blend",
-                    "scale-leaning blend","mostly scale, anchored by chord",
-                    "full scale (key/"..MODE_DISPLAY[state.mode_idx]..")"}
-  local mri = state.mel_rigidity == 0 and 1 or state.mel_rigidity < 25 and 2
-    or state.mel_rigidity < 50 and 3 or state.mel_rigidity < 75 and 4
-    or state.mel_rigidity < 100 and 5 or 6
-  reaper.ImGui_TextDisabled(ctx, mrlabels[mri])
-  reaper.ImGui_SameLine(ctx)
-  local mcolc, mcolv = sslider("Colour##mcol", state.mel_colour, 0, 100, 100)
-  if mcolc then state.mel_colour = mcolv; state.mel_live_events=nil end
-  reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_TextDisabled(ctx, state.mel_colour==0 and "no chromatic"
-    or state.mel_colour < 40 and "hint of colour"
-    or state.mel_colour < 75 and "passing tones"
-    or "chromatic")
-
-  local mmetc, mmetv = sslider("Metre##mmet", state.mel_metre, 0, 100, 130)
-  if mmetc then state.mel_metre = mmetv; state.mel_live_events=nil end
+  -- Cadence: single musical knob that drives chord-tone landings,
+  -- strong-beat preference, leading-tone approaches and phrase-end
+  -- cadential figures. Replaces the old Rigidity / Colour / Metre trio.
+  local mcadc, mcadv = sslider("Cadence##mcad", state.mel_cadence, 0, 100, 130)
+  if mcadc then state.mel_cadence = mcadv; state.mel_live_events=nil end
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_TextDisabled(ctx,
-    state.mel_metre == 0  and "free — any onset, any length" or
-    state.mel_metre < 25  and "loose — slight beat preference" or
-    state.mel_metre < 50  and "moderate — favours beats" or
-    state.mel_metre < 75  and "strong — snaps to beat grid" or
-    state.mel_metre < 90  and "strict — beats only, sub-beats rare" or
-    "locked — onsets on whole beats (min-grid: "..MEL_DUR_NAMES[state.mel_min_dur_idx]..")")
+    state.mel_cadence == 0   and "free wander — no landings, ambient" or
+    state.mel_cadence < 25   and "loose — chord tones at chord changes" or
+    state.mel_cadence < 50   and "phrasal — soft 4-bar arcs, voice-led" or
+    state.mel_cadence < 75   and "shaped — cadences at phrase ends" or
+    state.mel_cadence < 100  and "idiomatic — leading tones, suspensions" or
+    "textbook — antecedent / consequent, full cadences")
 
   reaper.ImGui_TextDisabled(ctx, "Busy "..state.mel_busyness.." — "..(
     state.mel_busyness == 0  and "very sparse — long held notes, occasional rests" or
