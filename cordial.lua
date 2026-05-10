@@ -2414,7 +2414,8 @@ local function combo(label, items, current_idx)
   if reaper.ImGui_BeginCombo(ctx, label, preview) then
     for i, v in ipairs(items) do
       local sel = (i == current_idx)
-      if reaper.ImGui_Selectable(ctx, v, sel) then new_idx, changed = i, true end
+      -- Append "##i" so items sharing a visible label still get unique IDs.
+      if reaper.ImGui_Selectable(ctx, v.."##"..i, sel) then new_idx, changed = i, true end
       if sel then reaper.ImGui_SetItemDefaultFocus(ctx) end
     end
     reaper.ImGui_EndCombo(ctx)
@@ -2447,7 +2448,8 @@ local function combo_grouped(label, items, current_idx)
         last_group = item.group
       end
       local sel = (i == current_idx)
-      if reaper.ImGui_Selectable(ctx, "  "..item.label, sel) then
+      -- Append "##i" so items sharing a visible label still get unique IDs.
+      if reaper.ImGui_Selectable(ctx, "  "..item.label.."##"..i, sel) then
         new_idx, changed = i, true
       end
       if sel then reaper.ImGui_SetItemDefaultFocus(ctx) end
