@@ -2629,6 +2629,97 @@ local function reset_live()
 end
 
 -- ----------------------------------------------------------------
+--  SETTINGS FILE SAVE / LOAD
+-- ----------------------------------------------------------------
+local function get_script_dir()
+  local _, p = reaper.get_action_context()
+  return p:match("^(.+[\\/])") or ""
+end
+
+local function save_settings_to_file()
+  local ok, inputs = reaper.GetUserInputs("Save Cordial Settings", 1,
+    "Filename (no extension):", "my_settings")
+  if not ok then return end
+  local name = inputs:match("^%s*(.-)%s*$")
+  if name == "" then name = "my_settings" end
+  name = name:gsub("[\\/]", "_")
+  local path = get_script_dir() .. name .. ".cordial"
+  local f = io.open(path, "w")
+  if not f then
+    reaper.ShowMessageBox("Could not write to:\n" .. path, "Cordial", 0)
+    return
+  end
+  for _, k in ipairs(PERSIST_KEYS) do
+    f:write(k .. "=" .. tostring(state[k]) .. "\n")
+  end
+  local nd = #state.chord_durations
+  f:write("num_chords=" .. nd .. "\n")
+  f:write("chord_durations="  .. arr_to_str(state.chord_durations) .. "\n")
+  f:write("chord_inversions=" .. arr_to_str(state.chord_inversions) .. "\n")
+  local qparts = {}
+  for i = 1, nd do qparts[i] = state.chord_quality_overrides[i] or "" end
+  f:write("chord_quality_overrides=" .. table.concat(qparts, ",") .. "\n")
+  f:write("custom_degrees_n=" .. #state.custom_degrees .. "\n")
+  f:write("custom_degrees="   .. arr_to_str(state.custom_degrees) .. "\n")
+  f:write("bass_pattern_notes=" .. arr_to_str(state.bass_pattern_notes) .. "\n")
+  f:close()
+  state.status_msg = "Saved: " .. path
+end
+
+local function load_settings_from_file()
+  local ok, path = reaper.GetUserFileNameForRead(get_script_dir(),
+    "Load Cordial Settings", "cordial")
+  if not ok or path == "" then return end
+  local f = io.open(path, "r")
+  if not f then
+    reaper.ShowMessageBox("Could not open:\n" .. path, "Cordial", 0)
+    return
+  end
+  local data = {}
+  for line in f:lines() do
+    local k, v = line:match("^([^=]+)=(.*)")
+    if k then data[k] = v end
+  end
+  f:close()
+  for _, k in ipairs(PERSIST_KEYS) do
+    local val = data[k]
+    if val and val ~= "" then
+      local def = state[k]
+      if type(def) == "number" then
+        state[k] = tonumber(val) or def
+      elseif type(def) == "boolean" then
+        state[k] = (val == "true")
+      else
+        state[k] = val
+      end
+    end
+  end
+  local nd = tonumber(data["num_chords"]) or #state.chord_durations
+  local val = data["chord_durations"]
+  if val and val ~= "" then state.chord_durations = str_to_num_arr(val, nd) end
+  val = data["chord_inversions"]
+  if val and val ~= "" then state.chord_inversions = str_to_num_arr(val, nd) end
+  val = data["chord_quality_overrides"]
+  if val and val ~= "" then
+    state.chord_quality_overrides = {}
+    local i = 0
+    for tok in (val..","):gmatch("([^,]*),") do
+      i = i + 1
+      state.chord_quality_overrides[i] = (tok ~= "") and tok or nil
+      if i >= nd then break end
+    end
+  end
+  local cdn = tonumber(data["custom_degrees_n"]) or #state.custom_degrees
+  val = data["custom_degrees"]
+  if val and val ~= "" then state.custom_degrees = str_to_num_arr(val, cdn) end
+  val = data["bass_pattern_notes"]
+  if val and val ~= "" then state.bass_pattern_notes = str_to_num_arr(val, 8) end
+  state.seed_str = tostring(state.seed)
+  reset_live()
+  state.status_msg = "Loaded: " .. path
+end
+
+-- ----------------------------------------------------------------
 --  MIDI ITEM WRITER
 -- ----------------------------------------------------------------
 local function get_or_create_track(name)
@@ -3422,6 +3513,11 @@ local function draw_ui()
   local rcc, rcv = reaper.ImGui_SliderInt(ctx, "cycles##rendercycles",
                                           state.mel_render_cycles, 1, 32)
   if rcc then state.mel_render_cycles = rcv end
+
+  reaper.ImGui_Spacing(ctx)
+  if reaper.ImGui_Button(ctx, "Save Settings...", 130, 0) then save_settings_to_file() end
+  reaper.ImGui_SameLine(ctx)
+  if reaper.ImGui_Button(ctx, "Load Settings...", 130, 0) then load_settings_from_file() end
 
   reaper.ImGui_Spacing(ctx)
   reaper.ImGui_Separator(ctx)
