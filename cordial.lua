@@ -1299,14 +1299,22 @@ local function surface_step(prev_pitch, target_pitch, scale_notes,
     local approach_prob = is_phrase_end and (0.4 + 0.6 * cadence)
                                         or (0.2 + 0.5 * cadence)
     if rng_float() < approach_prob then
-      -- Leading-tone (chromatic) on strong phrase-ending cadences.
-      if is_phrase_end and cadence > 0.5
-         and rng_float() < (cadence - 0.3) then
-        return leading_tone_to(target_pitch)
-      end
-      -- Otherwise diatonic step from whichever side is closer to prev.
       local up   = diatonic_step(scale_notes, target_pitch, 1)
       local down = diatonic_step(scale_notes, target_pitch, -1)
+      -- Semitone leading-tone only when that pitch is actually in the scale
+      -- (e.g. B→C in C major). Blind target-1 produces out-of-key notes
+      -- on every other scale degree, so we gate it here.
+      if is_phrase_end and cadence > 0.5
+         and rng_float() < (cadence - 0.3) then
+        local lt = target_pitch - 1
+        local lt_in_scale = false
+        for _, n in ipairs(scale_notes) do
+          if n % 12 == lt % 12 then lt_in_scale = true; break end
+        end
+        if lt_in_scale then return lt end
+        -- Not in scale: fall through to diatonic step below.
+      end
+      -- Diatonic step from whichever side is closer to prev.
       if math.abs(up - prev_pitch) <= math.abs(down - prev_pitch) then
         return up
       else
@@ -1368,11 +1376,12 @@ local function maybe_insert_colour(from_pitch, to_pitch, scale_notes,
   local diff = to_pitch - from_pitch
 
   -- 1. Leading-tone approach into a chord tone on a strong position.
+  -- Only when target - 1 is actually a scale degree (e.g. B→C in major);
+  -- a blind semitone-below produces out-of-key notes on most scale degrees.
   if target_is_strong and is_chord_tone(to_pitch, chord_pcs) then
-    -- Only if approach by step from below is musical (avoid huge backtrack).
     if math.abs(diff) <= 4 and rng_float() < 0.5 then
       local lt = leading_tone_to(to_pitch)
-      if math.abs(lt - from_pitch) <= 5 then return lt end
+      if scale_pcs[lt % 12] and math.abs(lt - from_pitch) <= 5 then return lt end
     end
   end
 
@@ -1385,9 +1394,12 @@ local function maybe_insert_colour(from_pitch, to_pitch, scale_notes,
     end
   end
 
-  -- 3. Chromatic passing tone between scale notes a whole step apart.
+  -- 3. Diatonic passing tone when notes are a whole step apart.
+  -- (A chromatic semitone between diatonic whole-step pairs is always
+  -- out of key, so we use a diatonic step toward the target instead.)
   if math.abs(diff) == 2 then
-    return from_pitch + (diff > 0 and 1 or -1)
+    local passing = diatonic_step(scale_notes, from_pitch, diff > 0 and 1 or -1)
+    if passing ~= from_pitch and passing ~= to_pitch then return passing end
   end
 
   -- 4. Diatonic passing run when notes are a third apart.
