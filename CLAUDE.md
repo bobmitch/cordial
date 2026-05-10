@@ -32,6 +32,7 @@ Key cross-cutting invariants:
 - **Determinism**: every generator reseeds via `rng_seed(state.seed)` so the same seed + same parameters produces identical output. Don't introduce `math.random()` calls that bypass this.
 - **Beats, not seconds**: durations flow as beats throughout; PPQ conversion happens only at MIDI write time using `state.ppq_per_beat`.
 - **Time signature is read live** at the cursor/playhead each frame — don't cache it across the generation pipeline.
+- **Per-project persistence** (`PROJECT STATE PERSISTENCE` section, ~line 477): scalar `state` fields are saved/loaded via `reaper.SetProjExtState` using the `PERSIST_KEYS` list as the single source of truth. When adding a new scalar field that should persist, append its key to `PERSIST_KEYS`. Array fields need explicit serialization/deserialization added to `save_proj_state` / `load_proj_state`. Do not add live-preview or runtime bookkeeping fields to either — only user-facing parameters belong there.
 
 ## House style — musicality first
 
