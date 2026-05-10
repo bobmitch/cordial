@@ -1261,15 +1261,22 @@ local function build_skeleton(progression, phrases, prev_skeleton_pitch)
         local height_p = lo + h * (hi - lo)
         local pick     = nearest_chord_tone(height_p, chord_range)
         if prev then
-          -- Blend voice-leading distance with contour height: the line
-          -- wants to step (small interval to prev) AND aim at the
-          -- contour's target pitch. Equal weight produces gently arcing
-          -- but always-singable spines.
+          -- Blend voice-leading distance with contour height. The
+          -- weights slide with contour strength: at a contour extreme
+          -- (top of an arch, bottom of a valley) the height target
+          -- pulls hard, so the spine actually traverses the available
+          -- mel-oct range; near the contour midpoint voice-leading
+          -- wins, keeping the line singable. Without this slide the
+          -- old fixed weighting (lead 1.0, height 0.5) trapped the
+          -- skeleton near prev no matter how wide the octave range.
+          local contour_strength = math.abs(h - 0.5) * 2  -- 0..1
+          local lead_w   = 1.0 - 0.7 * contour_strength
+          local height_w = 0.3 + 0.7 * contour_strength
           local best, best_score = pick, math.huge
           for _, n in ipairs(chord_range) do
             local lead_d   = math.abs(n - prev)
             local height_d = math.abs(n - height_p)
-            local score    = lead_d + height_d * 0.5
+            local score    = lead_d * lead_w + height_d * height_w
             if score < best_score then best, best_score = n, score end
           end
           pick = best
@@ -1291,9 +1298,46 @@ end
 --   is_final_onset = the next onset will be on the new chord (target)
 --   is_phrase_end  = that next onset is also the start of a new phrase
 local function surface_step(prev_pitch, target_pitch, scale_notes,
-                            is_final_onset, is_phrase_end)
+                            is_final_onset, is_phrase_end, ctx)
   local cadence = (state.mel_cadence or 60) / 100.0
   if #scale_notes == 0 then return prev_pitch end
+
+  -- Leap recovery: if the previous onset took a consonant leap, this
+  -- onset balances it with a diatonic step in the opposite direction
+  -- (the classical leap-then-step rule that keeps wide intervals from
+  -- sounding jarring). Recovery is forced even on a final-onset slot
+  -- since the leap that caused it was itself non-final.
+  if ctx and ctx.leap_recover_dir then
+    local rdir = ctx.leap_recover_dir
+    ctx.leap_recover_dir = nil
+    return diatonic_step(scale_notes, prev_pitch, rdir)
+  end
+
+  -- Consonant leap: small chance, only on non-final onsets so it
+  -- doesn't fight the cadence approach figure. Jumps to a chord tone
+  -- a 4th–6th away from prev in the contour direction; the next
+  -- onset will step back via the recovery branch above. This is the
+  -- only path through which the surface line can traverse register
+  -- — without it the walker is bounded to ±3 scale steps per onset.
+  if not is_final_onset and ctx and ctx.chord_range
+     and #ctx.chord_range > 0 and rng_float() < 0.10 then
+    local dir
+    if target_pitch and target_pitch ~= prev_pitch then
+      dir = (target_pitch > prev_pitch) and 1 or -1
+    else
+      dir = (rng_float() < 0.5) and 1 or -1
+    end
+    local candidates = {}
+    for _, n in ipairs(ctx.chord_range) do
+      local d = (n - prev_pitch) * dir
+      if d >= 5 and d <= 9 then candidates[#candidates+1] = n end
+    end
+    if #candidates > 0 then
+      local leap = candidates[rng_int(1, #candidates)]
+      ctx.leap_recover_dir = -dir
+      return leap
+    end
+  end
 
   if is_final_onset and target_pitch then
     local approach_prob = is_phrase_end and (0.4 + 0.6 * cadence)
@@ -1465,8 +1509,9 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
   -- Cache PC sets for the duration of this block
   local scale_pcs = scale_pc_set()
   local chord_pcs = chord_pc_set(chord_notes)
-  context.scale_pcs = scale_pcs
-  context.chord_pcs = chord_pcs
+  context.scale_pcs   = scale_pcs
+  context.chord_pcs   = chord_pcs
+  context.chord_range = chord_range
 
   local events       = {}
   local prev         = context.prev_pitch or scale_notes[1] or 60
@@ -1634,7 +1679,7 @@ local function mel_strat_free(block_dur, chord_notes, scale_notes, chord_range, 
   local function pitch_fn(pos, bdur, cn, sn, prev, c)
     if c.is_block_start_slot then return c.block_skeleton or prev end
     return surface_step(prev, c.next_skeleton, sn,
-                        c.is_final_onset_of_block, c.is_phrase_end)
+                        c.is_final_onset_of_block, c.is_phrase_end, c)
   end
   return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
 end
@@ -1657,7 +1702,7 @@ local function mel_strat_phrase(block_dur, chord_notes, scale_notes, chord_range
       end
     end
     return surface_step(prev, c.next_skeleton, sn,
-                        c.is_final_onset_of_block, c.is_phrase_end)
+                        c.is_final_onset_of_block, c.is_phrase_end, c)
   end
   return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
 end
@@ -1728,7 +1773,7 @@ local function mel_strat_motif(block_dur, chord_notes, scale_notes, chord_range,
     if c.is_final_onset_of_block and c.is_phrase_end and c.next_skeleton then
       local cadence = (state.mel_cadence or 60) / 100.0
       if cadence > 0.5 and rng_float() < (cadence - 0.3) then
-        return surface_step(prev, c.next_skeleton, sn, true, true)
+        return surface_step(prev, c.next_skeleton, sn, true, true, c)
       end
     end
     local ci  = c.motif_ci or 1
@@ -1763,7 +1808,7 @@ local function mel_strat_mechanical(block_dur, chord_notes, scale_notes, chord_r
     if c.is_final_onset_of_block and c.next_skeleton then
       local cadence = (state.mel_cadence or 60) / 100.0
       if rng_float() < cadence then
-        return surface_step(prev, c.next_skeleton, sn, true, c.is_phrase_end)
+        return surface_step(prev, c.next_skeleton, sn, true, c.is_phrase_end, c)
       end
     end
     local idx  = nearest_idx(sn, prev)
