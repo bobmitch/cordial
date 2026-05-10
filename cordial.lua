@@ -329,6 +329,8 @@ local MEL_PRESETS = {
   "Motif",          -- 8: seed cell repeated with variation
 }
 
+local BASS_STYLES = {"Root", "Root-Fifth", "Walking", "Boogie"}
+
 -- ----------------------------------------------------------------
 --  STATE
 -- ----------------------------------------------------------------
@@ -391,6 +393,27 @@ local state = {
   mel_live_last_idx = -1,
   mel_wait_boundary = false,
 
+  -- Bass layer
+  bass_enabled       = false,
+  bass_track_name    = "Bass",
+  bass_channel       = 3,          -- 0-based (MIDI ch 4)
+  bass_style_idx     = 1,          -- index into BASS_STYLES
+  bass_oct           = 2,          -- octave anchor for bass notes
+  bass_follow_inv    = false,      -- honour chord inversion for bass note selection
+  bass_velocity      = 90,
+  bass_vel_human     = 10,
+  bass_gate          = 90,
+  bass_approach_prob = 70,         -- Walking: prob (0-100) of chromatic approach on last beat
+
+  -- Bass live preview
+  bass_live_enabled   = false,
+  bass_live_note      = -1,
+  bass_live_note_end  = -1,
+  bass_live_events    = nil,
+  bass_live_total_beats = 0,
+  bass_live_last_idx  = -1,
+  bass_wait_boundary  = false,
+
   -- Seed / keep
   seed        = math.floor(reaper.time_precise() * 1000) % 99999,
   seed_str    = "",
@@ -451,6 +474,12 @@ state.seed_str = tostring(state.seed)
 local function rng_seed(s) math.randomseed(s) end
 local function rng_float()  return math.random() end
 local function rng_int(a,b) return math.random(a,b) end
+
+-- Isolated RNG stream for bass: derived from state.seed so same seed → same bass,
+-- but independent of the arp/melody stream so neither can shift the other.
+local function bass_rng_reseed()
+  rng_seed((state.seed * 1664525 + 1013904223) % 99991 + 1)
+end
 
 -- ----------------------------------------------------------------
 --  TIME SIGNATURE HELPERS
@@ -1974,6 +2003,130 @@ local function build_arp_events(chord_notes, chord_dur_beats, chord_abs_beat)
 end
 
 -- ----------------------------------------------------------------
+--  BASS GENERATOR
+-- ----------------------------------------------------------------
+
+-- Resolve which MIDI pitch-class to anchor the bass line on for a given chord.
+-- When bass_follow_inv is true the actual bass note after inversion is used
+-- (slash-chord semantics); otherwise the harmonic root is always used.
+local function bass_landing_pitch(chord)
+  local pc = state.bass_follow_inv and (chord.bass_midi % 12) or (chord.root_midi % 12)
+  return (state.bass_oct + 1) * 12 + pc
+end
+
+local function bass_pick_vel()
+  local v = state.bass_velocity + math.floor((rng_float()*2-1) * state.bass_vel_human)
+  return math.max(1, math.min(127, v))
+end
+
+-- Build a list of {pitch, pos, dur, vel} events for one chord slot.
+-- next_chord is the following slot (used by Walking for approach notes); nil = last chord.
+local function build_bass_events(chord, chord_dur, next_chord)
+  local events = {}
+  local gate   = state.bass_gate / 100.0
+  local style  = BASS_STYLES[state.bass_style_idx]
+  local land   = bass_landing_pitch(chord)
+
+  -- ── Root ────────────────────────────────────────────────────
+  if style == "Root" then
+    events[#events+1] = {pitch=land, pos=0, dur=chord_dur * gate, vel=bass_pick_vel()}
+
+  -- ── Root-Fifth ──────────────────────────────────────────────
+  elseif style == "Root-Fifth" then
+    if chord_dur < 2.0 then
+      events[#events+1] = {pitch=land, pos=0, dur=chord_dur * gate, vel=bass_pick_vel()}
+    else
+      local half     = chord_dur / 2
+      local fifth_pc = (land % 12 + 7) % 12
+      local fifth    = (state.bass_oct + 1) * 12 + fifth_pc
+      if fifth < land then fifth = fifth + 12 end   -- keep fifth above root
+      events[#events+1] = {pitch=land,  pos=0,    dur=half * gate, vel=bass_pick_vel()}
+      events[#events+1] = {pitch=fifth, pos=half,  dur=half * gate, vel=bass_pick_vel()}
+    end
+
+  -- ── Walking ─────────────────────────────────────────────────
+  elseif style == "Walking" then
+    local mode      = MODE_NAMES[state.mode_idx]
+    local ivs       = SCALE_INTERVALS[mode]
+    local root_pc   = (state.root_idx - 1) % 12
+    -- Two octaves of scale tones centred on bass_oct for walking room.
+    local scale_bass = {}
+    for oct = state.bass_oct, state.bass_oct + 1 do
+      for _, iv in ipairs(ivs) do
+        scale_bass[#scale_bass+1] = (oct + 1) * 12 + (root_pc + iv) % 12
+      end
+    end
+    table.sort(scale_bass)
+    local n_beats   = math.max(1, math.floor(chord_dur + 0.5))
+    local next_land = next_chord and bass_landing_pitch(next_chord) or land
+    local prev_pitch = land
+    for b = 0, n_beats - 1 do
+      local pos  = b * 1.0
+      local dur  = math.min(gate, chord_dur - pos)
+      local pitch
+      if b == 0 then
+        -- Always land on the chord anchor.
+        pitch = land
+      elseif b == n_beats - 1 and next_chord then
+        -- Last beat: directed approach toward next chord's root.
+        if rng_float() < state.bass_approach_prob / 100.0 then
+          local diff = next_land - prev_pitch
+          if diff > 0 then
+            pitch = next_land - 1   -- semitone below (approach from below)
+          elseif diff < 0 then
+            pitch = next_land + 1   -- semitone above (approach from above)
+          else
+            pitch = land
+          end
+          pitch = math.max(state.bass_oct * 12,
+                           math.min((state.bass_oct + 2) * 12 - 1, pitch))
+        else
+          pitch = voice_lead_to_chord(prev_pitch, scale_bass, 5)
+        end
+      else
+        -- Middle beats: diatonic step in the direction of next_land.
+        local dir   = (next_land >= prev_pitch) and 1 or -1
+        local best, best_d = nil, math.huge
+        for _, sp in ipairs(scale_bass) do
+          local d = sp - prev_pitch
+          if dir > 0 and d > 0 and d < best_d then
+            best, best_d = sp, d
+          elseif dir < 0 and d < 0 and math.abs(d) < best_d then
+            best, best_d = sp, math.abs(d)
+          end
+        end
+        pitch = best or voice_lead_to_chord(prev_pitch, scale_bass, 5)
+      end
+      events[#events+1] = {pitch=pitch, pos=pos, dur=dur, vel=bass_pick_vel()}
+      prev_pitch = pitch
+    end
+
+  -- ── Boogie ──────────────────────────────────────────────────
+  elseif style == "Boogie" then
+    local half_beat = 0.5
+    local n_steps   = math.floor(chord_dur / half_beat + 0.5)
+    local fifth_pc  = (land % 12 + 7) % 12
+    local fifth     = (state.bass_oct + 1) * 12 + fifth_pc
+    if fifth < land then fifth = fifth + 12 end
+    -- Upper note: major 6th (+9) for major/dominant, minor 7th (+10) for minor chords.
+    local ivs_chord = CHORD_INTERVALS[chord.quality] or CHORD_INTERVALS["maj"]
+    local is_minor  = false
+    for _, iv in ipairs(ivs_chord) do if iv == 3 then is_minor = true; break end end
+    local upper_pc  = (land % 12 + (is_minor and 10 or 9)) % 12
+    local upper     = (state.bass_oct + 1) * 12 + upper_pc
+    if upper < land then upper = upper + 12 end
+    local pattern = {land, fifth, upper, fifth}
+    for s = 0, n_steps - 1 do
+      local pos = s * half_beat
+      local dur = math.min(half_beat * gate, chord_dur - pos)
+      events[#events+1] = {pitch=pattern[(s % 4)+1], pos=pos, dur=dur, vel=bass_pick_vel()}
+    end
+  end
+
+  return events
+end
+
+-- ----------------------------------------------------------------
 --  LIVE CHORD PREVIEW
 -- ----------------------------------------------------------------
 local function live_notes_off()
@@ -2208,6 +2361,80 @@ local function mel_live_tick(progression)
 end
 
 -- ----------------------------------------------------------------
+--  LIVE BASS PREVIEW
+-- ----------------------------------------------------------------
+local function bass_live_note_off()
+  if state.bass_live_note >= 0 then
+    reaper.StuffMIDIMessage(0, 0x80 | state.bass_channel, state.bass_live_note, 0)
+    state.bass_live_note     = -1
+    state.bass_live_note_end = -1
+  end
+end
+
+local function bass_live_rebuild(progression)
+  bass_rng_reseed()
+  local events = {}
+  local pos    = 0
+  for i, ch in ipairs(progression) do
+    local next_ch  = progression[(i % #progression) + 1]
+    local bass_evs = build_bass_events(ch, ch.duration, next_ch)
+    for _, ev in ipairs(bass_evs) do
+      events[#events+1] = {pitch=ev.pitch, pos=pos+ev.pos, dur=ev.dur, vel=ev.vel}
+    end
+    pos = pos + ch.duration
+  end
+  state.bass_live_events      = events
+  state.bass_live_total_beats = pos
+  state.bass_live_last_idx    = -1
+  bass_live_note_off()
+end
+
+local function bass_live_tick(progression)
+  local play_state = reaper.GetPlayState()
+  if play_state == 0 or play_state == 2 then
+    bass_live_note_off(); state.bass_live_last_idx=-1; state.bass_wait_boundary=false; return
+  end
+  if not state.bass_live_events then
+    bass_live_rebuild(progression)
+    state.bass_live_last_idx = -1; state.bass_wait_boundary = true
+  end
+  local events      = state.bass_live_events
+  local total_beats = state.bass_live_total_beats
+  if not events or #events == 0 or total_beats == 0 then return end
+  local pos_beats  = reaper.GetPlayPosition() * reaper.Master_GetTempo() / 60.0
+  local loop_beats = pos_beats % total_beats
+  local cur_idx = -1
+  for i, ev in ipairs(events) do
+    if ev.pos <= loop_beats then cur_idx = i else break end
+  end
+  if reaper.ImGui_IsAnyItemActive(ctx) then
+    bass_live_note_off(); state.bass_wait_boundary=true; state.bass_live_last_idx=cur_idx; return
+  end
+  if state.bass_wait_boundary then
+    if cur_idx == state.bass_live_last_idx then return end
+    state.bass_wait_boundary = false
+    state.bass_live_last_idx = cur_idx - 1
+  end
+  if cur_idx < 1 then
+    bass_live_note_off(); state.bass_live_last_idx=-1; return
+  end
+  if cur_idx ~= state.bass_live_last_idx then
+    bass_live_note_off()
+    local ev = events[cur_idx]
+    if loop_beats < ev.pos + ev.dur then
+      reaper.StuffMIDIMessage(0, 0x90 | state.bass_channel, ev.pitch, ev.vel)
+      state.bass_live_note     = ev.pitch
+      state.bass_live_note_end = ev.pos + ev.dur
+    end
+    state.bass_live_last_idx = cur_idx
+  else
+    if state.bass_live_note >= 0 and loop_beats >= state.bass_live_note_end then
+      bass_live_note_off()
+    end
+  end
+end
+
+-- ----------------------------------------------------------------
 --  RESET LIVE  (all layers)
 -- ----------------------------------------------------------------
 local function reset_live()
@@ -2220,6 +2447,9 @@ local function reset_live()
   state.mel_live_events     = nil
   state.mel_wait_boundary   = true
   mel_live_note_off()
+  state.bass_live_events    = nil
+  state.bass_wait_boundary  = true
+  bass_live_note_off()
 end
 
 -- ----------------------------------------------------------------
@@ -2362,6 +2592,38 @@ local function write_all()
     written[#written+1] = state.mel_track_name
   end
 
+  -- Bass layer: one cycle generated with isolated RNG; pattern repeated verbatim.
+  if state.bass_enabled then
+    local track = get_or_create_track(state.bass_track_name)
+    bass_rng_reseed()
+    local cycle_evs = {}
+    local pos = 0
+    for i, ch in ipairs(progression) do
+      local next_ch  = progression[(i % #progression) + 1]
+      local bass_evs = build_bass_events(ch, ch.duration, next_ch)
+      for _, ev in ipairs(bass_evs) do
+        cycle_evs[#cycle_evs+1] = {pitch=ev.pitch, pos=pos+ev.pos, dur=ev.dur, vel=ev.vel}
+      end
+      pos = pos + ch.duration
+    end
+    local events = {}
+    for cyc = 0, cycles - 1 do
+      local cyc_off = cyc * cycle_beats
+      for _, ev in ipairs(cycle_evs) do
+        events[#events+1] = {
+          pitch=ev.pitch, pos=cyc_off+ev.pos, dur=ev.dur,
+          vel=ev.vel, channel=state.bass_channel,
+        }
+      end
+    end
+    local _, err = write_midi_item(track, item_start, item_len, events, ppq)
+    if err then
+      state.status_msg="Bass write error: "..err
+      reaper.Undo_EndBlock("Chord Generator: write (failed)", -1); return
+    end
+    written[#written+1] = state.bass_track_name
+  end
+
   local total_bars = 0
   for _, ch in ipairs(progression) do total_bars = total_bars + ch.dur_bars end
   total_bars = total_bars * cycles
@@ -2383,8 +2645,9 @@ local function randomise_seed()
   state.seed_str = tostring(state.seed)
   rng_seed(state.seed)
   reset_live()
-  state.arp_live_events = nil
-  state.mel_live_events = nil
+  state.arp_live_events  = nil
+  state.mel_live_events  = nil
+  state.bass_live_events = nil
 end
 
 local function apply_seed_str()
@@ -2394,8 +2657,9 @@ local function apply_seed_str()
     state.seed_str = tostring(state.seed)
     rng_seed(state.seed)
     reset_live()
-    state.arp_live_events = nil
-    state.mel_live_events = nil
+    state.arp_live_events  = nil
+    state.mel_live_events  = nil
+    state.bass_live_events = nil
   end
 end
 
@@ -2845,6 +3109,42 @@ local function draw_ui()
     state.mel_busyness < 100 and "busy — bursts of subdivision around bar/half-bar landmarks" or
     "very busy — dense subdivision bursts, snapped to quarter-note boundaries"))
 
+  -- ── Bass Layer ───────────────────────────────────────────────
+  reaper.ImGui_SeparatorText(ctx, "Bass Layer")
+  local blc, blv = reaper.ImGui_Checkbox(ctx, "Enabled##bass", state.bass_enabled)
+  if blc then state.bass_enabled = blv; state.bass_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 120)
+  local _, btn = reaper.ImGui_InputText(ctx, "Track##btrk", state.bass_track_name)
+  state.bass_track_name = btn
+  reaper.ImGui_SameLine(ctx)
+  local bchc, bchv = sslider("Ch##bch", state.bass_channel+1, 1, 16, 55)
+  if bchc then state.bass_channel = bchv-1; state.bass_live_events = nil end
+
+  reaper.ImGui_SetNextItemWidth(ctx, 120)
+  local bsc, bsv = combo("Style##bstyle", BASS_STYLES, state.bass_style_idx)
+  if bsc then state.bass_style_idx = bsv; state.bass_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  local bocc, bocv = sslider("Oct##boct", state.bass_oct, 1, 4, 65)
+  if bocc then state.bass_oct = bocv; state.bass_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  local bfic, bfiv = reaper.ImGui_Checkbox(ctx, "Follow inv##bfinv", state.bass_follow_inv)
+  if bfic then state.bass_follow_inv = bfiv; state.bass_live_events = nil end
+
+  local bvc, bvv = sslider("Vel##bvel", state.bass_velocity, 1, 127, 65)
+  if bvc then state.bass_velocity = bvv; state.bass_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  local bhc, bhv = sslider("+/-##bhuman", state.bass_vel_human, 0, 40, 55)
+  if bhc then state.bass_vel_human = bhv; state.bass_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  local bgc, bgv = sslider("Gate%%##bgate", state.bass_gate, 5, 100, 75)
+  if bgc then state.bass_gate = bgv; state.bass_live_events = nil end
+  if BASS_STYLES[state.bass_style_idx] == "Walking" then
+    reaper.ImGui_SameLine(ctx)
+    local bac, bav = sslider("Approach%%##bapp", state.bass_approach_prob, 0, 100, 95)
+    if bac then state.bass_approach_prob = bav; state.bass_live_events = nil end
+  end
+
   -- ── Live Preview ─────────────────────────────────────────────
   reaper.ImGui_SeparatorText(ctx, "Live Preview")
 
@@ -2881,7 +3181,19 @@ local function draw_ui()
     mel_live_tick(progression)
   end
 
-  if state.live_enabled or state.arp_live_enabled or state.mel_live_enabled then
+  local blec, blev = reaper.ImGui_Checkbox(ctx, "Bass##basslivecheck", state.bass_live_enabled)
+  if blec then
+    state.bass_live_enabled = blev
+    if not blev then bass_live_note_off(); state.bass_live_last_idx=-1 end
+  end
+  if state.bass_live_enabled then
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_TextDisabled(ctx, "Bass Ch")
+    bass_live_tick(progression)
+  end
+
+  if state.live_enabled or state.arp_live_enabled or state.mel_live_enabled
+      or state.bass_live_enabled then
     reaper.ImGui_SameLine(ctx)
     reaper.ImGui_TextDisabled(ctx, "  Press Play to hear")
   end
@@ -2958,7 +3270,7 @@ local function loop()
     reaper.ImGui_End(ctx)
   end
   if not open then
-    live_notes_off(); arp_live_note_off(); mel_live_note_off()
+    live_notes_off(); arp_live_note_off(); mel_live_note_off(); bass_live_note_off()
   end
   if open then reaper.defer(loop) end
 end
