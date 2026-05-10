@@ -1258,27 +1258,43 @@ end
 -- 1. PHRASE PLANNER ──────────────────────────────────────────────
 -- Group the progression into ~4-bar phrases (absorbing any remainder
 -- into the final phrase). Each phrase carries a contour shape used by
--- skeleton selection. The contour cycles deterministically so phrase 1
--- and phrase 2 don't have the same shape — this is what gives the line
--- its sense of question/answer.
+-- skeleton selection. The contour cycle is shuffled deterministically
+-- from state.seed so phrase 1 isn't always an "arch" (which made the
+-- middle of every short progression peak high in the same way). Same
+-- seed → same shuffle → same line.
 local PHRASE_CONTOURS = {"arch", "descend", "ascend", "valley"}
+
+-- Deterministic shuffle driven by state.seed via a local LCG, so we
+-- don't perturb the global math.random stream the rest of the melody
+-- pipeline is consuming.
+local function shuffled_contours()
+  local out = { table.unpack(PHRASE_CONTOURS) }
+  local s = ((state.seed or 0) * 2654435761 + 2246822519) % 2^31
+  for i = #out, 2, -1 do
+    s = (s * 1103515245 + 12345) % 2^31
+    local j = (s % i) + 1
+    out[i], out[j] = out[j], out[i]
+  end
+  return out
+end
 
 local function plan_phrases(progression, bar_beats)
   local target_phrase_beats = 4 * (bar_beats or state.timesig_num)
+  local contours = shuffled_contours()
   local phrases = {}
   local cur = { start_block = 1, end_block = 0, beats = 0 }
   for i, ch in ipairs(progression) do
     cur.beats     = cur.beats + ch.duration
     cur.end_block = i
     if cur.beats >= target_phrase_beats - 0.001 then
-      cur.contour = PHRASE_CONTOURS[((#phrases) % #PHRASE_CONTOURS) + 1]
+      cur.contour = contours[((#phrases) % #contours) + 1]
       phrases[#phrases+1] = cur
       cur = { start_block = i+1, end_block = 0, beats = 0 }
     end
   end
   if cur.start_block <= #progression then
     cur.end_block = #progression
-    cur.contour   = PHRASE_CONTOURS[((#phrases) % #PHRASE_CONTOURS) + 1]
+    cur.contour   = contours[((#phrases) % #contours) + 1]
     phrases[#phrases+1] = cur
   end
   -- Fill in absolute beat positions.
