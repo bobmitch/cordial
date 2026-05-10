@@ -381,9 +381,13 @@ local state = {
   mel_oct_min      = 4,          -- minimum octave for melody
   mel_oct_max      = 5,          -- maximum octave for melody
   mel_busyness     = 45,         -- 0=sparse/long-held, 100=dense/clustered bursts
-  mel_rigidity     = 30,         -- 0=chord tones only, 100=full scale (post-filter)
-  mel_colour       = 0,          -- 0=scale only, 100=chromatic passing tones allowed
-  mel_metre        = 50,         -- 0=free (no beat awareness), 100=strong beat enforcement
+  mel_cadence      = 60,         -- 0=free wander, 100=textbook cadences w/ phrase grammar
+  -- Internal: derived from mel_cadence each generation pass via
+  -- apply_cadence_to_legacy(). Not user-facing; readers across
+  -- mel_fill_block / build_onset_candidates / pick_dur_slots /
+  -- maybe_insert_colour consume them as locals.
+  mel_colour       = 0,
+  mel_metre        = 50,
   mel_render_cycles = 4,         -- offline write: number of progression cycles to render
 
   -- Melody live preview
@@ -498,8 +502,8 @@ local PERSIST_KEYS = {
   -- Melody layer
   "mel_enabled", "mel_track_name", "mel_channel", "mel_preset_idx",
   "mel_min_dur_idx", "mel_max_dur_idx", "mel_velocity", "mel_vel_human",
-  "mel_oct_min", "mel_oct_max", "mel_busyness", "mel_rigidity",
-  "mel_colour", "mel_metre", "mel_render_cycles",
+  "mel_oct_min", "mel_oct_max", "mel_busyness", "mel_cadence",
+  "mel_render_cycles",
   -- Bass layer
   "bass_enabled", "bass_track_name", "bass_channel", "bass_style_idx",
   "bass_oct", "bass_follow_inv", "bass_velocity", "bass_vel_human",
@@ -511,6 +515,23 @@ local PERSIST_KEYS = {
 }
 
 local EXT_NS = "cordial"  -- namespace for SetProjExtState
+
+-- One-way migration: the old 8-preset melody list collapses to 4.
+--   1 Free / 2 Flowing / 4 Conversational  → 1 Free
+--   3 Structured / 6 Phrase & Answer       → 2 Phrase
+--   7 Fractal / 8 Motif                    → 3 Motif
+--   5 Mechanical                           → 4 Mechanical
+-- Triggered when loading a save that predates mel_cadence (the marker
+-- for the new 4-preset world).
+local MEL_PRESET_MIGRATION = { 1, 1, 2, 1, 4, 2, 3, 3 }
+local function migrate_mel_preset_idx()
+  local v = state.mel_preset_idx
+  if type(v) == "number" and v >= 1 and v <= #MEL_PRESET_MIGRATION then
+    state.mel_preset_idx = MEL_PRESET_MIGRATION[v]
+  else
+    state.mel_preset_idx = 1
+  end
+end
 
 local function arr_to_str(t)
   local parts = {}
@@ -555,6 +576,12 @@ local function load_proj_state()
   ok, val = reaper.GetProjExtState(0, EXT_NS, "root_idx")
   if not ok or val == "" then return end  -- nothing saved yet for this project
 
+  -- Detect a pre-overhaul save by checking for the new mel_cadence key
+  -- *before* the scalar loop overwrites the default. Old saves predate
+  -- the 8→4 melody preset collapse and need preset_idx migration.
+  local _, cad_val = reaper.GetProjExtState(0, EXT_NS, "mel_cadence")
+  local needs_mel_migration = (cad_val == "")
+
   -- Scalars
   for _, k in ipairs(PERSIST_KEYS) do
     ok, val = reaper.GetProjExtState(0, EXT_NS, k)
@@ -569,6 +596,7 @@ local function load_proj_state()
       end
     end
   end
+  if needs_mel_migration then migrate_mel_preset_idx() end
 
   -- Arrays
   ok, val = reaper.GetProjExtState(0, EXT_NS, "num_chords")
@@ -825,14 +853,6 @@ end
 -- Leading-tone (semitone below) approach to a target.
 local function leading_tone_to(target_pitch) return target_pitch - 1 end
 
--- Chromatic enclosure to a target: returns {upper_diatonic, lower_chromatic}
--- that resolve into the target by step.
-local function chromatic_enclosure_to(scale_notes, target_pitch)
-  local upper = diatonic_step(scale_notes, target_pitch, 1)
-  local lower = target_pitch - 1
-  return upper, lower
-end
-
 -- ----------------------------------------------------------------
 --  PHRASE-ARC / TENSION SCAFFOLDING
 --
@@ -931,12 +951,17 @@ end
 -- ----------------------------------------------------------------
 local function chord_tone_landing_prob(is_block_start, metric_weight, tension)
   tension = tension or 0
+  -- Cadence drives commitment to harmonic landings. At 0 the line is a
+  -- free wander; at 100 every block start and downbeat strongly prefers
+  -- a chord tone. Per-position probabilities interpolate from a low floor
+  -- (cadence=0) to today's strong defaults (cadence=100).
+  local cadence = (state.mel_cadence or 60) / 100.0
   local p = 0
-  if is_block_start         then p = math.max(p, 0.95) end
-  if metric_weight >= 0.95  then p = math.max(p, 0.85) end   -- downbeat
-  if metric_weight >= 0.55  then p = math.max(p, 0.55) end   -- mid-bar
-  if metric_weight >= 0.30  then p = math.max(p, 0.30) end   -- whole beat
-  -- Tension relaxes the rule by up to ~40%.
+  if is_block_start         then p = math.max(p, 0.20 + 0.75 * cadence) end
+  if metric_weight >= 0.95  then p = math.max(p, 0.10 + 0.75 * cadence) end -- downbeat
+  if metric_weight >= 0.55  then p = math.max(p, 0.05 + 0.50 * cadence) end -- mid-bar
+  if metric_weight >= 0.30  then p = math.max(p,        0.30 * cadence) end -- whole beat
+  -- Tension still relaxes the rule by up to ~40% so the arc can climb away.
   p = p * (1.0 - 0.4 * tension)
   return p
 end
@@ -1144,19 +1169,182 @@ local function pick_duration(min_beats, max_beats)
   return valid[rng_int(1, #valid)]
 end
 
--- Apply rigidity post-filter: if note is not a chord tone and
--- rng < (1 - rigidity/100), snap to nearest chord tone.
--- (Kept as the final safety net; generators now compose with chord
--- tones up-front, so this fires far less often.)
-local function apply_rigidity(pitch, chord_notes_range)
-  if state.mel_rigidity >= 100 then return pitch end
-  if #chord_notes_range == 0 then return pitch end
-  if is_chord_tone(pitch, chord_pc_set(chord_notes_range)) then return pitch end
-  local snap_prob = 1.0 - (state.mel_rigidity / 100.0)
-  if rng_float() < snap_prob then
-    return nearest_chord_tone(pitch, chord_notes_range)
+-- ============================================================
+--  PHRASE PLANNER / SKELETON / SURFACE WALKER
+--
+--  Shared melody infrastructure consumed by the strategy generators.
+--  The flow is:
+--
+--    plan_phrases   → groups the progression into musical phrases,
+--                     each with a contour shape (arch / descend /
+--                     ascend / valley, cycled across phrases).
+--    build_skeleton → picks one structural tone per chord block,
+--                     voice-led across the phrase and shaped by the
+--                     contour. This is the line's spine; first onset
+--                     of every block lands on it.
+--    surface_step   → walks one onset toward the next structural tone,
+--                     with target-aware approach figures (leading
+--                     tone, scale step) on the final onset before a
+--                     chord-change landing.
+--
+--  Strength scales with state.mel_cadence (0 = free wander, 100 =
+--  textbook cadences). Random choices flow through rng_float() to
+--  preserve the seed contract.
+-- ============================================================
+
+-- 1. PHRASE PLANNER ──────────────────────────────────────────────
+-- Group the progression into ~4-bar phrases (absorbing any remainder
+-- into the final phrase). Each phrase carries a contour shape used by
+-- skeleton selection. The contour cycles deterministically so phrase 1
+-- and phrase 2 don't have the same shape — this is what gives the line
+-- its sense of question/answer.
+local PHRASE_CONTOURS = {"arch", "descend", "ascend", "valley"}
+
+local function plan_phrases(progression, bar_beats)
+  local target_phrase_beats = 4 * (bar_beats or state.timesig_num)
+  local phrases = {}
+  local cur = { start_block = 1, end_block = 0, beats = 0 }
+  for i, ch in ipairs(progression) do
+    cur.beats     = cur.beats + ch.duration
+    cur.end_block = i
+    if cur.beats >= target_phrase_beats - 0.001 then
+      cur.contour = PHRASE_CONTOURS[((#phrases) % #PHRASE_CONTOURS) + 1]
+      phrases[#phrases+1] = cur
+      cur = { start_block = i+1, end_block = 0, beats = 0 }
+    end
   end
-  return pitch
+  if cur.start_block <= #progression then
+    cur.end_block = #progression
+    cur.contour   = PHRASE_CONTOURS[((#phrases) % #PHRASE_CONTOURS) + 1]
+    phrases[#phrases+1] = cur
+  end
+  -- Fill in absolute beat positions.
+  local abs = 0
+  for _, ph in ipairs(phrases) do
+    ph.abs_start = abs
+    for j = ph.start_block, ph.end_block do
+      abs = abs + progression[j].duration
+    end
+    ph.abs_end = abs
+  end
+  return phrases
+end
+
+-- Phrase contour height at relative position t∈[0,1]. 0 = low, 1 = high.
+local function contour_height(contour, t)
+  if contour == "arch"    then return math.sin(t * math.pi) end
+  if contour == "valley"  then return 1 - math.sin(t * math.pi) end
+  if contour == "ascend"  then return t end
+  if contour == "descend" then return 1 - t end
+  return 0.5
+end
+
+-- 2. SKELETON BUILDER ────────────────────────────────────────────
+-- One structural tone per chord block, voice-led across the whole
+-- progression and shaped by each phrase's contour. Returns an array
+-- indexed by block_idx.
+local function build_skeleton(progression, phrases, prev_skeleton_pitch)
+  local skeleton = {}
+  local prev = prev_skeleton_pitch
+  for _, ph in ipairs(phrases) do
+    local n_blocks = ph.end_block - ph.start_block + 1
+    for offs = 0, n_blocks - 1 do
+      local bi          = ph.start_block + offs
+      local ch          = progression[bi]
+      local chord_range = chord_notes_in_range(ch.notes)
+      if #chord_range == 0 then
+        skeleton[bi] = prev or 60
+      else
+        local t        = (n_blocks > 1) and (offs / (n_blocks - 1)) or 0.5
+        local h        = contour_height(ph.contour, t)
+        local lo, hi   = chord_range[1], chord_range[#chord_range]
+        local height_p = lo + h * (hi - lo)
+        local pick     = nearest_chord_tone(height_p, chord_range)
+        if prev then
+          -- Blend voice-leading distance with contour height: the line
+          -- wants to step (small interval to prev) AND aim at the
+          -- contour's target pitch. Equal weight produces gently arcing
+          -- but always-singable spines.
+          local best, best_score = pick, math.huge
+          for _, n in ipairs(chord_range) do
+            local lead_d   = math.abs(n - prev)
+            local height_d = math.abs(n - height_p)
+            local score    = lead_d + height_d * 0.5
+            if score < best_score then best, best_score = n, score end
+          end
+          pick = best
+        end
+        skeleton[bi] = pick
+        prev = pick
+      end
+    end
+  end
+  return skeleton
+end
+
+-- 3. SURFACE WALKER ──────────────────────────────────────────────
+-- Walk one onset from prev_pitch toward target_pitch. Stepwise by
+-- default. On the *final* onset before a chord-change landing an
+-- idiomatic figure (leading tone, scale-step from above/below) takes
+-- over with strength scaled by cadence and amplified at phrase ends.
+--
+--   is_final_onset = the next onset will be on the new chord (target)
+--   is_phrase_end  = that next onset is also the start of a new phrase
+local function surface_step(prev_pitch, target_pitch, scale_notes,
+                            is_final_onset, is_phrase_end)
+  local cadence = (state.mel_cadence or 60) / 100.0
+  if #scale_notes == 0 then return prev_pitch end
+
+  if is_final_onset and target_pitch then
+    local approach_prob = is_phrase_end and (0.4 + 0.6 * cadence)
+                                        or (0.2 + 0.5 * cadence)
+    if rng_float() < approach_prob then
+      -- Leading-tone (chromatic) on strong phrase-ending cadences.
+      if is_phrase_end and cadence > 0.5
+         and rng_float() < (cadence - 0.3) then
+        return leading_tone_to(target_pitch)
+      end
+      -- Otherwise diatonic step from whichever side is closer to prev.
+      local up   = diatonic_step(scale_notes, target_pitch, 1)
+      local down = diatonic_step(scale_notes, target_pitch, -1)
+      if math.abs(up - prev_pitch) <= math.abs(down - prev_pitch) then
+        return up
+      else
+        return down
+      end
+    end
+    -- Approach declined: fall through to general walk biased at target.
+  end
+
+  -- General walk: aim toward the target with mostly stepwise motion.
+  local idx_prev = nearest_idx(scale_notes, prev_pitch)
+  local idx_targ = target_pitch and nearest_idx(scale_notes, target_pitch) or idx_prev
+  local dir
+  if idx_targ == idx_prev then
+    dir = (rng_float() < 0.5) and 1 or -1   -- neighbour figure
+  else
+    dir = (idx_targ > idx_prev) and 1 or -1
+  end
+  -- Step size: mostly 1, occasional 2 (third), very occasional 3.
+  local r = rng_float()
+  local step = (r < 0.75) and 1 or (r < 0.95) and 2 or 3
+  -- Small chance of reverse step for a passing/neighbour shape.
+  if rng_float() < 0.15 then dir = -dir end
+  local idx = math.max(1, math.min(#scale_notes, idx_prev + dir * step))
+  return scale_notes[idx]
+end
+
+-- 4. CADENCE → INTERNAL PARAMS ──────────────────────────────────
+-- Several engine-internal helpers (build_onset_candidates,
+-- pick_dur_slots, maybe_insert_colour) still read mel_metre and
+-- mel_colour as scalars. Derive both from the single Cadence knob each
+-- generation pass: cadence drives strong-beat preference (mel_metre)
+-- and chromatic embellishment density (mel_colour) in lock-step, so
+-- the UI keeps a single coherent musical control.
+local function apply_cadence_to_legacy()
+  local c = (state.mel_cadence or 60) / 100.0
+  state.mel_metre  = math.floor(c * 80)
+  state.mel_colour = math.floor(c * 70)
 end
 
 -- ----------------------------------------------------------------
@@ -1238,11 +1426,19 @@ local function mel_max_beats() return MEL_DURATIONS[state.mel_max_dur_idx].beats
 --     - nil                  : skip this onset (treated as a rest)
 --
 -- Context keys set per onset (read-only for pitch_fn):
---   ctx.is_block_start_slot     true on the very first onset of the block
---   ctx.metric_weight_here      0..1 metrical weight at this onset
---   ctx.land_chord_tone_p       0..1 desired chord-tone landing probability
---   ctx.tension_here            0..1 phrase-arc tension at this onset
---   ctx.scale_pcs / chord_pcs   pitch-class sets (cached for convenience)
+--   ctx.is_block_start_slot       true on the very first onset of the block
+--   ctx.is_final_onset_of_block   true if the next onset will land on the
+--                                 next chord (i.e. this is the last note
+--                                 inside the current chord block)
+--   ctx.metric_weight_here        0..1 metrical weight at this onset
+--   ctx.land_chord_tone_p         0..1 desired chord-tone landing probability
+--   ctx.tension_here              0..1 phrase-arc tension at this onset
+--   ctx.scale_pcs / chord_pcs     pitch-class sets (cached for convenience)
+--
+-- Context keys set per block (by build_melody_cycle, before this is called):
+--   ctx.block_skeleton    structural pitch this block must land on (chord tone)
+--   ctx.next_skeleton     structural pitch the next block will land on
+--   ctx.is_phrase_end     true if the next block starts a new phrase
 local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
                                pitch_fn, context)
   local grid      = mel_min_beats()
@@ -1302,16 +1498,19 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
       min_slots, max_slots, remaining_slots
     )
 
+    -- Walker context: this onset is the *last* one inside the block if
+    -- placing it now exhausts the remaining slots. Generators consult
+    -- this when choosing a final-approach figure toward next_skeleton.
+    context.is_final_onset_of_block = (slot + dur_slots >= block_slots)
+
     -- Rest probability — derived from busyness via the phrase-arc density
     -- envelope. Sparse settings rest more (and only between phrases);
     -- dense settings rest rarely. Block-start is never a rest (we want
     -- the chord to be defined on attack), and strong beats rest less.
-    -- For caller-dur presets (Fractal/Motif) the rhythm is structural,
-    -- so we soften busyness's pull on the rest gate to avoid breaking
-    -- the cell.
+    -- For caller-dur presets (Motif) the rhythm is structural, so we
+    -- soften busyness's pull on the rest gate to avoid breaking the cell.
     local density = phrase_arc_density(context, abs_beat)
-    local soft = (state.mel_preset_idx == 7 or state.mel_preset_idx == 8)
-                 and 0.5 or 1.0
+    local soft = (state.mel_preset_idx == 3) and 0.5 or 1.0  -- Motif
     local rest_p = (1.0 - density) * 35.0 * soft
     if first_onset    then rest_p = 0 end
     if mw >= 0.95     then rest_p = rest_p * 0.25 end
@@ -1339,28 +1538,26 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
                                                    math.min(caller_dur, remaining_slots)))
         end
 
-        -- Cross-block voice leading: at the first onset of a non-first
-        -- block, prefer the pre-staged voice-led chord tone unless the
-        -- generator already returned a chord tone close to it.
-        if first_onset and context.voice_led_target then
-          local vt = context.voice_led_target
-          if not is_chord_tone(pitch, chord_pcs) or math.abs(pitch - vt) > 4 then
-            -- Honour the voice-led target on strong landings.
-            if rng_float() < math.max(0.7, landing_p) then
-              pitch = vt
-            end
+        -- First onset of every block lands on the structural skeleton
+        -- pitch — voice-led across the whole progression by build_skeleton.
+        -- Generators may opt out by returning a chord tone close to the
+        -- skeleton themselves; otherwise the skeleton wins.
+        if first_onset and context.block_skeleton then
+          local sk = context.block_skeleton
+          if not is_chord_tone(pitch, chord_pcs) or math.abs(pitch - sk) > 4 then
+            pitch = sk
           end
         end
 
-        -- Chord-tone landing enforcement: with probability landing_p, snap
-        -- a non-chord-tone result to the nearest chord tone. This is an
-        -- additional gate on top of apply_rigidity.
-        if landing_p > 0 and not is_chord_tone(pitch, chord_pcs)
+        -- Chord-tone landing enforcement on strong beats inside the block:
+        -- with probability landing_p (cadence-driven), snap a non-chord
+        -- result to the nearest chord tone.
+        if not first_onset and landing_p > 0
+           and not is_chord_tone(pitch, chord_pcs)
            and rng_float() < landing_p then
           pitch = nearest_chord_tone(pitch, chord_range)
         end
 
-        pitch = apply_rigidity(pitch, chord_range)
         pitch = math.max(state.mel_oct_min * 12,
                 math.min((state.mel_oct_max + 1) * 12 - 1, pitch))
 
@@ -1402,255 +1599,164 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
   return events
 end
 
--- ── 1. FREE ─────────────────────────────────────────────────────
--- Weighted random walk biased toward chord tones; gap fill after leaps
-local function mel_free(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+-- ============================================================
+--  STRATEGY GENERATORS
+--
+--  Four presets, each implemented as a thin pitch_fn on top of
+--  mel_fill_block + the shared planner / skeleton / surface walker.
+--  Identity per preset:
+--
+--    Free       – wandering line, surface walker aims at landings.
+--    Phrase     – sentence form: presentation → continuation → cadence.
+--                 Stronger phrase-end articulation; same surface walker.
+--    Motif      – develops a small cell. Cell transposes to the
+--                 skeleton pitch of every chord block; periodic
+--                 inversion / retrograde / fragmentation.
+--    Mechanical – honest fixed-interval pattern. Lands the skeleton
+--                 at block starts and lets cadence soften the final
+--                 approach toward each chord change.
+-- ============================================================
+
+-- ── 1. FREE ────────────────────────────────────────────────────
+local function mel_strat_free(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
   local function pitch_fn(pos, bdur, cn, sn, prev, c)
-    local pcs = {}
-    for _, n in ipairs(cn) do pcs[n % 12] = true end
-    -- After a large leap, bias back toward prev (gap fill)
-    local last_leap = c.last_leap or 0
-    local weights = {}
-    local total = 0
-    for i, n in ipairs(sn) do
-      local dist = math.abs(n - prev)
-      local w = 1.0
-      -- Chord tone bonus
-      if pcs[n % 12] then w = w * 3 end
-      -- Stepwise preference
-      if dist <= 2 then w = w * 2 end
-      -- Gap fill: if last move was a big leap, prefer filling back
-      if math.abs(last_leap) > 4 then
-        local fill_dir = last_leap > 0 and (n < prev) or (n > prev)
-        if fill_dir then w = w * 2.5 end
-      end
-      weights[i] = w
-      total = total + w
-    end
-    local r = rng_float() * total
-    local acc = 0
-    for i, w in ipairs(weights) do
-      acc = acc + w
-      if r <= acc then
-        c.last_leap = sn[i] - prev
-        return sn[i]
-      end
-    end
-    return sn[#sn]
+    if c.is_block_start_slot then return c.block_skeleton or prev end
+    return surface_step(prev, c.next_skeleton, sn,
+                        c.is_final_onset_of_block, c.is_phrase_end)
   end
   return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
 end
 
--- ── 2. FLOWING ──────────────────────────────────────────────────
--- Smooth noise-driven pitch selection — positions map to a sine curve
--- offset by the seed, giving a naturally arching contour
-local function mel_flowing(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
-  local phase = ctx_tbl.flow_phase or (rng_float() * math.pi * 2)
-  local freq  = ctx_tbl.flow_freq  or (0.3 + rng_float() * 0.7)
-  ctx_tbl.flow_phase = phase
-  ctx_tbl.flow_freq  = freq
-
+-- ── 2. PHRASE ──────────────────────────────────────────────────
+-- Same surface logic as Free, but biases the rest gate toward leaving
+-- a breath at the very last onset of a phrase-end block when cadence
+-- is high — the line says something, then breathes before the answer.
+local function mel_strat_phrase(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
   local function pitch_fn(pos, bdur, cn, sn, prev, c)
-    local t = pos / bdur
-    -- Smooth value 0..1 following a sine wave
-    local smooth = (math.sin(t * math.pi * 2 * freq + phase) + 1) * 0.5
-    local target_idx = 1 + math.floor(smooth * (#sn - 1))
-    target_idx = math.max(1, math.min(#sn, target_idx))
-    -- Allow ±1 scale step of variation via rng
-    local variation = rng_int(-1, 1)
-    local idx = math.max(1, math.min(#sn, target_idx + variation))
-    return sn[idx]
+    if c.is_block_start_slot then return c.block_skeleton or prev end
+    -- Phrase-end final-onset breath: at high cadence, occasionally
+    -- skip the very last onset so the next phrase can speak fresh.
+    -- Capped at ~40% so even at maximum cadence the breath punctuates
+    -- rather than dominates.
+    if c.is_final_onset_of_block and c.is_phrase_end then
+      local cadence = (state.mel_cadence or 60) / 100.0
+      if cadence > 0.5 and rng_float() < (cadence - 0.5) * 0.8 then
+        return nil   -- rest
+      end
+    end
+    return surface_step(prev, c.next_skeleton, sn,
+                        c.is_final_onset_of_block, c.is_phrase_end)
   end
   return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
 end
 
--- ── 3. STRUCTURED ───────────────────────────────────────────────
--- Follows a seed-chosen contour (arch, valley, ascending, descending, wave)
--- and generates a repeating rhythmic motif
-local CONTOURS = {"arch","valley","ascending","descending","wave"}
-local function mel_structured(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
-  if not ctx_tbl.contour then
-    ctx_tbl.contour = CONTOURS[rng_int(1, #CONTOURS)]
-  end
-  if not ctx_tbl.motif_rhythm then
-    -- Generate a short rhythmic motif of 2-4 durations
-    local motif = {}
-    local motif_len = rng_int(2, 4)
-    for _ = 1, motif_len do
-      local d = pick_duration(mel_min_beats(), mel_max_beats())
-      -- At high metre, snap motif durations to the melody's min-note grid
-      -- so onsets always land on the user-selected rhythmic resolution.
-      -- Previously this forced durations to ≥1 beat, which silently
-      -- overrode a finer Min selection (e.g. 1/16) at metre ≥ 60.
-      if state.mel_metre >= 60 then
-        local grid = mel_min_beats()
-        d = math.max(grid, math.floor(d / grid + 0.5) * grid)
-      end
-      motif[#motif+1] = d
+-- ── 3. MOTIF ───────────────────────────────────────────────────
+-- A short cell (3–5 notes) with its own rhythm and a singable interval
+-- profile. On every chord change the cell is diatonically transposed so
+-- its first note lands on the skeleton pitch of the new chord — the
+-- shared infrastructure already guarantees that lands at block start;
+-- here we just make the rest of the cell follow. Periodic variation:
+-- inversion, retrograde, or fragmentation every few blocks.
+local function mel_strat_motif(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+  local grid       = mel_min_beats()
+  local min_slots  = 1
+  local max_slots  = math.floor(mel_max_beats() / grid + 0.5)
+
+  -- Build the seed cell once per progression.
+  if not ctx_tbl.motif_cell then
+    local cell_len      = rng_int(3, 5)
+    local cell          = {}
+    local interval_pool = { -2, -1, -1, -1, 0, 1, 1, 1, 2 }  -- mostly steps
+    local one_beat_slots = math.max(min_slots, math.floor(1.0 / grid + 0.5))
+    local rhythm_pool    = { 1, 1, 2, 2, one_beat_slots,
+                             math.max(1, math.floor(one_beat_slots / 2)) }
+    -- Filter rhythm_pool to valid range
+    local rh = {}
+    for _, v in ipairs(rhythm_pool) do
+      if v >= min_slots and v <= max_slots then rh[#rh+1] = v end
     end
-    ctx_tbl.motif_rhythm = motif
-    ctx_tbl.motif_pos    = 1
-  end
-
-  local contour = ctx_tbl.contour
-  local function contour_target(t)
-    if contour == "arch" then
-      return math.sin(t * math.pi)
-    elseif contour == "valley" then
-      return 1 - math.sin(t * math.pi)
-    elseif contour == "ascending" then
-      return t
-    elseif contour == "descending" then
-      return 1 - t
-    elseif contour == "wave" then
-      return (math.sin(t * math.pi * 4) + 1) * 0.5
+    if #rh == 0 then rh = { min_slots } end
+    -- Cell stored as scale-step offsets from its first note + dur in slots.
+    local idx_off = 0
+    cell[1] = { idx_offset = 0, dur_slots = rh[rng_int(1, #rh)] }
+    for i = 2, cell_len do
+      idx_off = idx_off + interval_pool[rng_int(1, #interval_pool)]
+      cell[i] = { idx_offset = idx_off, dur_slots = rh[rng_int(1, #rh)] }
     end
-    return 0.5
+    ctx_tbl.motif_cell    = cell
+    ctx_tbl.motif_ci      = 1
+    ctx_tbl.motif_block_n = 0
+    ctx_tbl.motif_invert  = false
+    ctx_tbl.motif_retro   = false
   end
 
-  local events    = {}
-  local pos       = 0
-  local prev      = ctx_tbl.prev_pitch or scale_notes[math.ceil(#scale_notes * 0.5)] or 60
-  local motif     = ctx_tbl.motif_rhythm
-  local mi        = ctx_tbl.motif_pos or 1
-  local scale_pcs = scale_pc_set()
-  local chord_pcs = chord_pc_set(chord_notes)
-  local first     = true
-
-  while pos < block_dur - 0.001 do
-    local remaining = block_dur - pos
-    local dur = math.min(motif[mi], remaining)
-    if dur < 0.001 then break end
-    mi = (mi % #motif) + 1
-
-    -- First onset of the block: never a rest; force a chord-tone landing
-    -- (voice-led from prev_pitch when possible) so chord changes feel
-    -- intentional rather than incidental. Otherwise rest probability is
-    -- driven by the busyness-modulated phrase-arc density.
-    local abs_beat = (ctx_tbl.abs_block_start or 0) + pos
-    local density  = phrase_arc_density(ctx_tbl, abs_beat)
-    local rest_p   = (first and 0) or ((1.0 - density) * 35.0)
-
-    if rng_float() * 100 >= rest_p then
-      local pitch
-      if first then
-        if ctx_tbl.voice_led_target then
-          pitch = ctx_tbl.voice_led_target
-        elseif #chord_range > 0 then
-          local t      = pos / block_dur
-          local cv     = contour_target(t)
-          local ti     = 1 + math.floor(cv * (#scale_notes - 1))
-          ti = math.max(1, math.min(#scale_notes, ti))
-          pitch = nearest_chord_tone(scale_notes[ti], chord_range)
-        else
-          pitch = scale_notes[math.ceil(#scale_notes/2)]
-        end
+  -- Per chord-block: reset cursor, recompute the block's anchor index
+  -- (the scale-step idx of the skeleton pitch).
+  if ctx_tbl.motif_block_for ~= ctx_tbl.abs_block_start then
+    ctx_tbl.motif_ci        = 1
+    ctx_tbl.motif_block_for = ctx_tbl.abs_block_start
+    ctx_tbl.motif_anchor_idx = nearest_idx(scale_notes,
+      ctx_tbl.block_skeleton or scale_notes[math.ceil(#scale_notes/2)])
+    ctx_tbl.motif_block_n   = (ctx_tbl.motif_block_n or 0) + 1
+    -- Light variation every 4 blocks: invert intervals OR retrograde.
+    if ctx_tbl.motif_block_n % 4 == 0 then
+      if rng_float() < 0.5 then
+        ctx_tbl.motif_invert = not ctx_tbl.motif_invert
       else
-        local t      = pos / block_dur
-        local cv     = contour_target(t)
-        local ti     = 1 + math.floor(cv * (#scale_notes - 1))
-        ti = math.max(1, math.min(#scale_notes, ti + rng_int(-1, 1)))
-        pitch = apply_rigidity(scale_notes[ti], chord_range)
-      end
-      pitch = math.max(state.mel_oct_min*12, math.min((state.mel_oct_max+1)*12-1, pitch))
-
-      local colour = nil
-      if not first then
-        colour = maybe_insert_colour(prev, pitch, scale_notes,
-                                     scale_pcs, chord_pcs, false)
-      end
-      if colour then
-        local cd = math.min(mel_min_beats(), dur * 0.5)
-        events[#events+1] = {pitch=colour, pos=pos, dur=cd, vel=mel_pick_vel()}
-        pos = pos + cd; dur = dur - cd
-      end
-      if dur > 0.001 then
-        events[#events+1] = {pitch=pitch, pos=pos, dur=dur, vel=mel_pick_vel()}
-        prev = pitch
-        first = false
+        ctx_tbl.motif_retro = not ctx_tbl.motif_retro
       end
     end
-    pos = pos + dur
   end
 
-  ctx_tbl.motif_pos  = mi
-  ctx_tbl.prev_pitch = prev
-  return events
-end
-
--- ── 4. CONVERSATIONAL ───────────────────────────────────────────
--- Markov-chain style: transition weights based on interval from last note.
--- Tension tracking: rises away from tonic/chord, resolves toward them.
-local function mel_conversational(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
-  local tension = ctx_tbl.tension or 0.0
-  local pcs = {}
-  for _, n in ipairs(chord_notes) do pcs[n % 12] = true end
-  local root_pc = (state.root_idx - 1) % 12
-
+  local cell = ctx_tbl.motif_cell
   local function pitch_fn(pos, bdur, cn, sn, prev, c)
-    local weights = {}
-    local total   = 0
-    for i, n in ipairs(sn) do
-      local interval = math.abs(n - prev)
-      local w = 1.0
-      -- Markov: prefer steps and small leaps
-      if interval == 0 then w = 0.1          -- avoid repeating same note too much
-      elseif interval <= 2 then w = 3.0      -- stepwise strongly preferred
-      elseif interval <= 4 then w = 1.5      -- small leap ok
-      elseif interval <= 7 then w = 0.7      -- larger leap less likely
-      else w = 0.2 end                        -- big leap rare
-
-      -- Tension resolution: high tension strongly prefers tonic/chord tones
-      local is_chord = pcs[n % 12]
-      local is_tonic = (n % 12) == root_pc
-      if tension > 0.6 then
-        if is_tonic  then w = w * 4 end
-        if is_chord  then w = w * 2 end
-      elseif tension > 0.3 then
-        if is_chord  then w = w * 1.5 end
+    -- On the very last onset of a phrase-end block at high cadence,
+    -- the cadence injection takes over: replace the cell's note with a
+    -- final-approach figure aimed at the next skeleton.
+    if c.is_final_onset_of_block and c.is_phrase_end and c.next_skeleton then
+      local cadence = (state.mel_cadence or 60) / 100.0
+      if cadence > 0.5 and rng_float() < (cadence - 0.3) then
+        return surface_step(prev, c.next_skeleton, sn, true, true)
       end
-
-      weights[i] = w
-      total = total + w
     end
-
-    local r = rng_float() * total
-    local acc = 0
-    local chosen = sn[1]
-    for i, w in ipairs(weights) do
-      acc = acc + w
-      if r <= acc then chosen = sn[i]; break end
-    end
-
-    -- Update tension: non-chord tones raise it, chord tones lower it
-    if pcs[chosen % 12] then
-      c.tension = math.max(0, (c.tension or 0) - 0.2)
-    else
-      c.tension = math.min(1, (c.tension or 0) + 0.15)
-    end
-
-    return chosen
+    local ci  = c.motif_ci or 1
+    local len = #cell
+    local read_i = c.motif_retro and (len - ci + 1) or ci
+    local entry  = cell[read_i]
+    local off    = entry.idx_offset
+    if c.motif_invert then off = -off end
+    local anchor = c.motif_anchor_idx or nearest_idx(sn, prev)
+    local idx    = math.max(1, math.min(#sn, anchor + off))
+    c.motif_ci   = (ci % len) + 1
+    return { pitch = sn[idx], dur_slots = entry.dur_slots }
   end
 
-  local evs = mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
-  return evs
+  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
 end
 
--- ── 5. MECHANICAL ───────────────────────────────────────────────
--- Strict intervallic rule: alternates between a fixed interval up and down.
--- The interval is seed-chosen (3rd, 4th, 5th). Very rhythmically regular.
-local function mel_mechanical(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
+-- ── 4. MECHANICAL ──────────────────────────────────────────────
+-- Strict alternating ±N scale-step pattern (interval seed-chosen,
+-- seed-stable). First onset of every block snaps to the skeleton; the
+-- final onset before a chord change softens toward the next landing
+-- with strength scaled by cadence.
+local function mel_strat_mechanical(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
   if not ctx_tbl.mech_interval then
-    local intervals = {2, 3, 4, 5}  -- scale steps
+    local intervals = {2, 3, 4, 5}
     ctx_tbl.mech_interval  = intervals[rng_int(1, #intervals)]
     ctx_tbl.mech_direction = 1
   end
-
   local function pitch_fn(pos, bdur, cn, sn, prev, c)
-    local idx    = nearest_idx(sn, prev)
-    local step   = c.mech_interval * c.mech_direction
+    if c.is_block_start_slot then return c.block_skeleton or prev end
+    -- Cadence-softened final approach into the next chord.
+    if c.is_final_onset_of_block and c.next_skeleton then
+      local cadence = (state.mel_cadence or 60) / 100.0
+      if rng_float() < cadence then
+        return surface_step(prev, c.next_skeleton, sn, true, c.is_phrase_end)
+      end
+    end
+    local idx  = nearest_idx(sn, prev)
+    local step = c.mech_interval * c.mech_direction
     local new_idx = idx + step
-    -- Bounce at edges
     if new_idx > #sn then
       c.mech_direction = -1
       new_idx = math.max(1, idx - c.mech_interval)
@@ -1663,284 +1769,12 @@ local function mel_mechanical(block_dur, chord_notes, scale_notes, chord_range, 
   return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
 end
 
--- ── 6. PHRASE & ANSWER ──────────────────────────────────────────
-local function mel_phrase_answer(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
-  local grid = mel_min_beats()
-  -- Snap split to bar boundary at high metre, otherwise seed-driven fraction
-  local split = block_dur * (0.4 + rng_float() * 0.25)
-  if state.mel_metre >= 60 then
-    local num     = state.timesig_num
-    local snapped = math.floor(split / num + 0.5) * num
-    snapped = math.max(num, math.min(block_dur - num, snapped))
-    if snapped > 0 and snapped < block_dur then split = snapped end
-  end
-  -- Snap split to grid
-  split = math.floor(split / grid + 0.5) * grid
-
-  local pcs      = {}
-  for _, n in ipairs(chord_notes) do pcs[n % 12] = true end
-  local root_pc  = (state.root_idx - 1) % 12
-  local phase    = ctx_tbl.pa_phase or 0
-  ctx_tbl.pa_phase = 1 - phase
-  local is_call  = (phase == 0)
-
-  local function pitch_fn(pos, bdur, cn, sn, prev, c)
-    local near_end = (bdur - pos) <= grid * 2
-    local weights  = {}
-    local total    = 0
-    for i, n in ipairs(sn) do
-      local w    = 1.0
-      local dist = math.abs(n - prev)
-      if dist <= 2 then w = w * 2 end
-      if near_end then
-        if is_call then
-          if (n % 12) == root_pc then w = w * 0.1 end
-        else
-          if (n % 12) == root_pc then w = w * 5 end
-          if pcs[n % 12]         then w = w * 2 end
-        end
-      end
-      weights[i] = w; total = total + w
-    end
-    local r = rng_float() * total; local acc = 0
-    for i, w in ipairs(weights) do
-      acc = acc + w
-      if r <= acc then return sn[i] end
-    end
-    return sn[#sn]
-  end
-
-  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
-end
-
--- ── 7. FRACTAL ──────────────────────────────────────────────────
--- Proper L-system / Schenkerian-style diminution: an axiom of
--- structural tones (chord tones of the home chord) is iteratively
--- rewritten by replacing each note with a small figure (passing,
--- neighbour, anticipation, leap-fill). Each iteration halves the
--- per-note duration, so the final stream is rhythmically self-similar.
---
--- The structural skeleton is composed of chord tones, so chord-tone
--- landings on strong beats are baked in by construction rather than
--- imposed after the fact. Per chord block the sequence is diatonically
--- transposed onto a chord tone of the current chord.
-local function mel_fractal(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
-  local grid      = mel_min_beats()
-  local min_slots = 1
-  local max_slots = math.floor(mel_max_beats() / grid + 0.5)
-
-  -- L-system productions on a (idx, dur_slots) note. Each rule expands
-  -- a single note into N notes with rhythm subdivided. Rules deliberately
-  -- bias toward stepwise motion and return-to-tone shapes.
-  local function expand_note(entry, sn_len)
-    local idx = entry.idx
-    local d   = entry.d
-    if d <= min_slots then return { entry } end       -- can't subdivide further
-    local half = math.max(min_slots, math.floor(d / 2))
-    local r = rng_float()
-    if r < 0.30 then
-      -- Upper neighbour: idx, idx+1, idx
-      return {
-        { idx = idx, d = half },
-        { idx = math.min(sn_len, idx + 1), d = math.max(min_slots, d - 2*half) > 0 and (d - 2*half) or half },
-        { idx = idx, d = half },
-      }
-    elseif r < 0.55 then
-      -- Lower neighbour: idx, idx-1, idx
-      return {
-        { idx = idx, d = half },
-        { idx = math.max(1, idx - 1), d = math.max(min_slots, d - 2*half) > 0 and (d - 2*half) or half },
-        { idx = idx, d = half },
-      }
-    elseif r < 0.80 then
-      -- Passing toward next structural tone: idx, idx+1 (or idx-1)
-      local dir = (rng_float() < 0.5) and 1 or -1
-      return {
-        { idx = idx, d = half },
-        { idx = math.max(1, math.min(sn_len, idx + dir)), d = d - half },
-      }
-    else
-      -- Anticipation: idx, idx (repeat with shorter onset)
-      return {
-        { idx = idx, d = half },
-        { idx = idx, d = d - half },
-      }
-    end
-  end
-
-  if not ctx_tbl.fractal_seq then
-    -- Axiom: a small chain of chord tones (3–4) of the *first* chord,
-    -- spanning a gentle arch. These become the structural tones.
-    local skeleton = {}
-    if #chord_range >= 2 then
-      local lo_i = math.max(1, math.floor(#chord_range * 0.3))
-      local hi_i = math.min(#chord_range, math.floor(#chord_range * 0.7) + 1)
-      skeleton = { chord_range[lo_i], chord_range[hi_i], chord_range[lo_i] }
-    elseif #chord_range == 1 then
-      skeleton = { chord_range[1] }
-    else
-      skeleton = { scale_notes[math.ceil(#scale_notes/2)] }
-    end
-    -- Convert pitches to (scale-step idx, full-beat duration) entries.
-    local one_beat_slots = math.max(min_slots, math.floor(1.0 / grid + 0.5))
-    local axiom = {}
-    for _, p in ipairs(skeleton) do
-      axiom[#axiom+1] = { idx = nearest_idx(scale_notes, p), d = one_beat_slots }
-    end
-
-    -- Apply 1–2 iterations of L-system expansion.
-    local depth = rng_int(1, 2)
-    local seq   = axiom
-    for _ = 1, depth do
-      local next_seq = {}
-      for _, e in ipairs(seq) do
-        for _, n in ipairs(expand_note(e, #scale_notes)) do
-          next_seq[#next_seq+1] = n
-        end
-      end
-      seq = next_seq
-    end
-
-    ctx_tbl.fractal_seq      = seq
-    ctx_tbl.fractal_seed_idx = axiom[1].idx
-    ctx_tbl.fractal_ei       = 1
-  end
-
-  -- Per-block diatonic transposition onto a chord tone of this chord.
-  if ctx_tbl.fractal_block_transp_for ~= ctx_tbl.abs_block_start then
-    local target
-    if ctx_tbl.voice_led_target then
-      target = ctx_tbl.voice_led_target
-    elseif #chord_range > 0 then
-      target = nearest_chord_tone(scale_notes[ctx_tbl.fractal_seed_idx], chord_range)
-    else
-      target = scale_notes[ctx_tbl.fractal_seed_idx]
-    end
-    ctx_tbl.fractal_block_transp = nearest_idx(scale_notes, target)
-                                 - ctx_tbl.fractal_seed_idx
-    ctx_tbl.fractal_block_transp_for = ctx_tbl.abs_block_start
-  end
-
-  local seq = ctx_tbl.fractal_seq
-  local function pitch_fn(pos, bdur, cn, sn, prev, c)
-    local ei = c.fractal_ei or 1
-    local entry = seq[ei]
-    local idx = math.max(1, math.min(#sn, entry.idx + c.fractal_block_transp))
-    c.fractal_ei = (ei % #seq) + 1
-    return { pitch = sn[idx], dur_slots = entry.d }
-  end
-
-  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
-end
-
--- ── 8. MOTIF ────────────────────────────────────────────────────
--- A short cell (3–5 notes) with its own rhythm and a deliberately
--- singable interval profile (mostly steps, at most one third). On
--- every chord change the cell is *diatonically transposed* so that
--- its first (or strongest) note lands on a chord tone of the new
--- chord — this is the technique behind every melodic sequence in
--- common-practice writing.
---
--- The cell stores (scale_idx, dur_slots) so its rhythm survives
--- `mel_fill_block`'s metric grid. Periodic variation: occasional
--- inversion or retrograde of the cell, keeping the rhythm intact.
-local function mel_motif(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
-  local grid       = mel_min_beats()
-  local min_slots  = 1
-  local max_slots  = math.floor(mel_max_beats() / grid + 0.5)
-
-  -- Build the seed cell once per progression.
-  if not ctx_tbl.motif_cell then
-    local cell_len = rng_int(3, 5)
-    local cell     = {}
-    -- Start the cell on a chord tone of the *first* chord, mid-range.
-    local start_p  = chord_range[math.max(1, math.floor(#chord_range/2))]
-                  or scale_notes[math.ceil(#scale_notes/2)]
-    local idx      = nearest_idx(scale_notes, start_p)
-    -- Interval shape: mostly ±1 steps, occasional ±2 (a third), with
-    -- a small chance of a return to the previous note.
-    local interval_pool = { -2, -1, -1, -1, 0, 1, 1, 1, 2 }
-    -- Reasonable rhythmic palette in min-grid steps. Skews to ≤ a beat
-    -- so the motif feels phrasal rather than ponderous.
-    local rhythm_pool = {}
-    do
-      local one_beat_slots = math.floor(1.0 / grid + 0.5)
-      local cands = { 1, 1, 2, 2, one_beat_slots, math.max(1, math.floor(one_beat_slots/2)) }
-      for _, v in ipairs(cands) do
-        if v >= min_slots and v <= max_slots then rhythm_pool[#rhythm_pool+1] = v end
-      end
-      if #rhythm_pool == 0 then rhythm_pool = { min_slots } end
-    end
-    for i = 1, cell_len do
-      local d = rhythm_pool[rng_int(1, #rhythm_pool)]
-      cell[#cell+1] = { idx_offset = idx - nearest_idx(scale_notes, start_p),
-                        dur_slots  = d }
-      local step = interval_pool[rng_int(1, #interval_pool)]
-      idx = math.max(1, math.min(#scale_notes, idx + step))
-    end
-    ctx_tbl.motif_cell      = cell
-    ctx_tbl.motif_seed_idx  = nearest_idx(scale_notes, start_p)
-    ctx_tbl.motif_ci        = 1
-    ctx_tbl.motif_block_n   = 0      -- counts blocks consumed (for variation)
-    ctx_tbl.motif_invert    = false
-    ctx_tbl.motif_retro     = false
-  end
-
-  -- Per-chord-block: compute a diatonic transposition that lands the
-  -- cell's first note on a chord tone of *this* chord, voice-led from
-  -- prev_pitch when possible. Fires exactly once per chord block.
-  if ctx_tbl.motif_block_transp_for ~= ctx_tbl.abs_block_start then
-    -- Restart the cell at its first note for each new chord block so the
-    -- diatonic transposition aligns with the cell's strongest moment.
-    ctx_tbl.motif_ci = 1
-    local prev = ctx_tbl.prev_pitch
-    local target
-    if prev and ctx_tbl.voice_led_target then
-      target = ctx_tbl.voice_led_target
-    elseif #chord_range > 0 then
-      -- Pick the chord tone closest to the cell's seed pitch.
-      local seed_pitch = scale_notes[ctx_tbl.motif_seed_idx]
-                      or scale_notes[math.ceil(#scale_notes/2)]
-      target = nearest_chord_tone(seed_pitch, chord_range)
-    else
-      target = scale_notes[ctx_tbl.motif_seed_idx]
-    end
-    local target_idx = nearest_idx(scale_notes, target)
-    ctx_tbl.motif_block_transp = target_idx - ctx_tbl.motif_seed_idx
-    ctx_tbl.motif_block_transp_for = ctx_tbl.abs_block_start
-    ctx_tbl.motif_block_n  = (ctx_tbl.motif_block_n or 0) + 1
-    -- Light variation every 4 blocks: invert intervals or retrograde.
-    if ctx_tbl.motif_block_n % 4 == 0 then
-      if rng_float() < 0.5 then
-        ctx_tbl.motif_invert = not ctx_tbl.motif_invert
-      else
-        ctx_tbl.motif_retro = not ctx_tbl.motif_retro
-      end
-    end
-  end
-
-  local cell   = ctx_tbl.motif_cell
-  local function pitch_fn(pos, bdur, cn, sn, prev, c)
-    local ci   = c.motif_ci or 1
-    local len  = #cell
-    local read_i = c.motif_retro and (len - ci + 1) or ci
-    local entry = cell[read_i]
-    local off   = entry.idx_offset
-    if c.motif_invert then off = -off end
-    local idx   = math.max(1, math.min(#sn,
-                          c.motif_seed_idx + c.motif_block_transp + off))
-    local pitch = sn[idx]
-    c.motif_ci  = (ci % len) + 1
-    return { pitch = pitch, dur_slots = entry.dur_slots }
-  end
-
-  return mel_fill_block(block_dur, chord_notes, scale_notes, chord_range, pitch_fn, ctx_tbl)
-end
-
--- Dispatcher
+-- Dispatcher: the four strategy presets in MEL_PRESET_ITEMS order.
 local MEL_GEN_FNS = {
-  mel_free, mel_flowing, mel_structured, mel_conversational,
-  mel_mechanical, mel_phrase_answer, mel_fractal, mel_motif,
+  mel_strat_free,        -- 1
+  mel_strat_phrase,      -- 2
+  mel_strat_motif,       -- 3
+  mel_strat_mechanical,  -- 4
 }
 
 -- Build one cycle of the progression, appending to `events` and mutating
@@ -1949,7 +1783,8 @@ local MEL_GEN_FNS = {
 -- cell etc.) so the RNG stream and musical state continue smoothly.
 -- Returns the absolute beat where this cycle ended.
 local function build_melody_cycle(progression, context, events, cycle_offset)
-  local gen_fn = MEL_GEN_FNS[state.mel_preset_idx] or mel_free
+  apply_cadence_to_legacy()
+  local gen_fn = MEL_GEN_FNS[state.mel_preset_idx] or MEL_GEN_FNS[1]
   local abs_pos = cycle_offset
 
   -- Phrase-arc tension repeats per cycle: each progression pass arcs from
@@ -1957,6 +1792,21 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
   local total_beats = 0
   for _, ch in ipairs(progression) do total_beats = total_beats + ch.duration end
   phrase_arc_init(context, total_beats, cycle_offset)
+
+  -- Plan phrases for this cycle and build a structural skeleton: one
+  -- voice-led chord tone per chord block, shaped by the per-phrase
+  -- contour. The first onset of each block lands on its skeleton pitch;
+  -- the surface walker aims at the *next* skeleton pitch through the
+  -- block's interior.
+  local phrases  = plan_phrases(progression, state.timesig_num)
+  local skeleton = build_skeleton(progression, phrases,
+                                  context.last_skeleton_pitch
+                                  or context.prev_pitch)
+  context.phrases  = phrases
+  context.skeleton = skeleton
+  -- Mark which block_idx is the LAST block of its phrase (= a phrase end).
+  local phrase_end_block = {}
+  for _, ph in ipairs(phrases) do phrase_end_block[ph.end_block] = true end
 
   for ci, ch in ipairs(progression) do
     local scale_notes  = scale_notes_in_range()
@@ -1966,17 +1816,14 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
     else
       context.abs_block_start = abs_pos
       context.chord_meta      = ch
-      -- "First block" gates voice-leading: only true on the very first
-      -- block of the very first cycle, when there's no prior pitch to
-      -- lead from. Cycle 2's first chord must voice-lead from cycle 1's
-      -- last pitch.
       context.is_first_block  = (cycle_offset == 0 and ci == 1)
-
-      if context.prev_pitch and not context.is_first_block then
-        context.voice_led_target = voice_lead_to_chord(context.prev_pitch, chord_range)
-      else
-        context.voice_led_target = nil
-      end
+      context.block_idx       = ci
+      context.block_skeleton  = skeleton[ci]
+      -- next_skeleton: target the surface walker aims at through this
+      -- block. At progression end we resolve to the current skeleton
+      -- (a settled close) — cycle wrap will pick up fresh next time.
+      context.next_skeleton   = skeleton[ci + 1] or skeleton[ci]
+      context.is_phrase_end   = phrase_end_block[ci] or false
 
       local block_evs = gen_fn(ch.duration, ch.notes, scale_notes, chord_range, context)
       for _, ev in ipairs(block_evs) do
@@ -1990,6 +1837,10 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
       abs_pos = abs_pos + ch.duration
     end
   end
+
+  -- Save final skeleton pitch so the next cycle's skeleton voice-leads
+  -- from where this one ended.
+  context.last_skeleton_pitch = skeleton[#progression]
 
   return abs_pos
 end
@@ -2688,6 +2539,10 @@ local function load_settings_from_file()
     if k then data[k] = v end
   end
   f:close()
+  -- Detect pre-overhaul saves (no mel_cadence key) before the loop
+  -- overwrites the default — old saves need the 8→4 preset migration.
+  local needs_mel_migration = (data["mel_cadence"] == nil
+                               or data["mel_cadence"] == "")
   for _, k in ipairs(PERSIST_KEYS) do
     local val = data[k]
     if val and val ~= "" then
@@ -2701,6 +2556,7 @@ local function load_settings_from_file()
       end
     end
   end
+  if needs_mel_migration then migrate_mel_preset_idx() end
   local nd = tonumber(data["num_chords"]) or #state.chord_durations
   local val = data["chord_durations"]
   if val and val ~= "" then state.chord_durations = str_to_num_arr(val, nd) end
@@ -3022,14 +2878,10 @@ end
 
 -- Melody preset items grouped
 local MEL_PRESET_ITEMS = {
-  {label="Free",            group="Organic"},
-  {label="Flowing",         group="Organic"},
-  {label="Structured",      group="Organic"},
-  {label="Conversational",  group="Organic"},
-  {label="Mechanical",      group="Rule-based"},
-  {label="Phrase & Answer", group="Compositional"},
-  {label="Fractal",         group="Compositional"},
-  {label="Motif",           group="Compositional"},
+  {label="Free",       group="Strategy"},
+  {label="Phrase",     group="Strategy"},
+  {label="Motif",      group="Strategy"},
+  {label="Mechanical", group="Strategy"},
 }
 
 -- Chord quality items grouped
@@ -3346,38 +3198,19 @@ local function draw_ui()
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_TextDisabled(ctx, "octave range")
 
-  -- Rigidity + Colour + Metre
-  local mrigc, mrigv = sslider("Rigidity##mrig", state.mel_rigidity, 0, 100, 130)
-  if mrigc then state.mel_rigidity = mrigv; state.mel_live_events=nil end
-  reaper.ImGui_SameLine(ctx)
-  -- apply_rigidity snaps non-chord tones with prob (1 - rigidity/100), and
-  -- stops snapping entirely only at 100. Label the slider accordingly.
-  local mrlabels = {"chord tones only","mostly chord, hint of scale","chord-leaning blend",
-                    "scale-leaning blend","mostly scale, anchored by chord",
-                    "full scale (key/"..MODE_DISPLAY[state.mode_idx]..")"}
-  local mri = state.mel_rigidity == 0 and 1 or state.mel_rigidity < 25 and 2
-    or state.mel_rigidity < 50 and 3 or state.mel_rigidity < 75 and 4
-    or state.mel_rigidity < 100 and 5 or 6
-  reaper.ImGui_TextDisabled(ctx, mrlabels[mri])
-  reaper.ImGui_SameLine(ctx)
-  local mcolc, mcolv = sslider("Colour##mcol", state.mel_colour, 0, 100, 100)
-  if mcolc then state.mel_colour = mcolv; state.mel_live_events=nil end
-  reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_TextDisabled(ctx, state.mel_colour==0 and "no chromatic"
-    or state.mel_colour < 40 and "hint of colour"
-    or state.mel_colour < 75 and "passing tones"
-    or "chromatic")
-
-  local mmetc, mmetv = sslider("Metre##mmet", state.mel_metre, 0, 100, 130)
-  if mmetc then state.mel_metre = mmetv; state.mel_live_events=nil end
+  -- Cadence: single musical knob that drives chord-tone landings,
+  -- strong-beat preference, leading-tone approaches and phrase-end
+  -- cadential figures. Replaces the old Rigidity / Colour / Metre trio.
+  local mcadc, mcadv = sslider("Cadence##mcad", state.mel_cadence, 0, 100, 130)
+  if mcadc then state.mel_cadence = mcadv; state.mel_live_events=nil end
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_TextDisabled(ctx,
-    state.mel_metre == 0  and "free — any onset, any length" or
-    state.mel_metre < 25  and "loose — slight beat preference" or
-    state.mel_metre < 50  and "moderate — favours beats" or
-    state.mel_metre < 75  and "strong — snaps to beat grid" or
-    state.mel_metre < 90  and "strict — beats only, sub-beats rare" or
-    "locked — onsets on whole beats (min-grid: "..MEL_DUR_NAMES[state.mel_min_dur_idx]..")")
+    state.mel_cadence == 0   and "free wander — no landings, ambient" or
+    state.mel_cadence < 25   and "loose — chord tones at chord changes" or
+    state.mel_cadence < 50   and "phrasal — soft 4-bar arcs, voice-led" or
+    state.mel_cadence < 75   and "shaped — cadences at phrase ends" or
+    state.mel_cadence < 100  and "idiomatic — leading tones, suspensions" or
+    "textbook — antecedent / consequent, full cadences")
 
   reaper.ImGui_TextDisabled(ctx, "Busy "..state.mel_busyness.." — "..(
     state.mel_busyness == 0  and "very sparse — long held notes, occasional rests" or
