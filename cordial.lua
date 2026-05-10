@@ -412,6 +412,10 @@ local state = {
   -- maybe_insert_colour consume them as locals.
   mel_colour       = 0,
   mel_metre        = 50,
+  -- Rhythmic rigidity: bias each note's duration to match the onset's grid
+  -- alignment. 0 = current chaotic behaviour; 100 = a 1/4 only starts on a
+  -- 1/4 boundary, an 1/8 only on an 1/8 boundary, etc.
+  mel_rhythm_rigidity = 0,
   mel_render_cycles = 4,         -- offline write: number of progression cycles to render
 
   -- Melody live preview
@@ -527,7 +531,7 @@ local PERSIST_KEYS = {
   "mel_enabled", "mel_track_name", "mel_channel", "mel_preset_idx",
   "mel_min_dur_idx", "mel_max_dur_idx", "mel_velocity", "mel_vel_human",
   "mel_oct_min", "mel_oct_max", "mel_busyness", "mel_space", "mel_cadence",
-  "mel_render_cycles",
+  "mel_rhythm_rigidity", "mel_render_cycles",
   -- Bass layer
   "bass_enabled", "bass_track_name", "bass_channel", "bass_style_idx",
   "bass_oct", "bass_follow_inv", "bass_velocity", "bass_vel_human",
@@ -1101,6 +1105,8 @@ local function pick_dur_slots(onset_slot, abs_start_slot, grid,
   local mw     = metrical_weight(abs_start_slot + onset_slot, grid)
   local metre  = state.mel_metre / 100.0
   local busy   = (state.mel_busyness or 50) / 100.0
+  local rrig   = (state.mel_rhythm_rigidity or 0) / 100.0
+  local abs_onset_beat = (abs_start_slot + onset_slot) * grid
 
   -- Build list of candidate durations (integer multiples of min_slots
   -- that correspond to valid MEL_DURATIONS grid values)
@@ -1141,6 +1147,20 @@ local function pick_dur_slots(onset_slot, abs_start_slot, grid,
     -- mid setting leaves the metric/metre logic mostly untouched.
     local busy_strength = math.abs(busy - 0.5) * 2.0 * 0.7
     local w = (1.0 - busy_strength) * metric_term + busy_strength * busy_bias
+    -- Rhythmic rigidity: a duration of d_beats "fits" this onset when the
+    -- onset sits on the d_beats grid (e.g. an 1/8 starting on an 1/8). Boost
+    -- aligned durations and demote unaligned ones, scaled by the slider.
+    if rrig > 0 then
+      local d_beats = valid[i] * grid
+      local q       = abs_onset_beat / d_beats
+      local frac    = q - math.floor(q)
+      local aligned = frac < 0.005 or (1.0 - frac) < 0.005
+      if aligned then
+        w = w * (1.0 + rrig * 3.0)
+      else
+        w = w * math.max(0.02, 1.0 - rrig * 0.95)
+      end
+    end
     weights[i] = w
     total = total + w
   end
@@ -3314,6 +3334,17 @@ local function draw_ui()
     state.mel_cadence < 75   and "shaped — cadences at phrase ends" or
     state.mel_cadence < 100  and "idiomatic — leading tones, suspensions" or
     "textbook — antecedent / consequent, full cadences")
+
+  local mrrc, mrrv = sslider("Rhythm##mrrig", state.mel_rhythm_rigidity, 0, 100, 130)
+  if mrrc then state.mel_rhythm_rigidity = mrrv; state.mel_live_events=nil end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextDisabled(ctx,
+    state.mel_rhythm_rigidity == 0   and "free — durations land anywhere on the grid" or
+    state.mel_rhythm_rigidity < 25   and "loose — mild bias toward aligned starts" or
+    state.mel_rhythm_rigidity < 50   and "phrased — 1/8s lean to 1/8 grid, 1/4s to 1/4 grid" or
+    state.mel_rhythm_rigidity < 75   and "tight — durations strongly prefer their own grid" or
+    state.mel_rhythm_rigidity < 100  and "metronomic — off-grid placements rare" or
+    "locked — every duration on its matching grid")
 
   reaper.ImGui_TextDisabled(ctx, "Busy "..state.mel_busyness.." — "..(
     state.mel_busyness == 0  and "very sparse — long held notes, occasional rests" or
