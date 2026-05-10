@@ -1,12 +1,35 @@
 -- ============================================================
---  Chord Generator  –  Phase 3
---  Adds: melody layer with 8 generation presets, rigidity,
---        colour (chromatic passing tones), min/max duration,
---        metre (beat placement enforcement),
---        busyness (arc-shaped density / clustering of shorter
---        notes around bar/half-bar landmarks), live preview
+--  cordial  –  REAPER chord / arp / melody generator
 --
---  Requires: ReaImGui extension (install via ReaPack)
+--  Generates MIDI items at the edit cursor for three independent
+--  layers, each on its own auto-created track, all driven from a
+--  single seeded RNG so a given seed + parameter set is reproducible.
+--
+--  Layers:
+--    • Chords   – block chords from a large catalog of progression
+--                 presets (diatonic, modal, borrowed, jazz, blues,
+--                 cadential, etc.), grouped by category. Each preset
+--                 carries its own mode so borrowed-chord labels
+--                 (bVII, bII, …) render at the correct root.
+--                 Per-slot chord-quality overrides are supported.
+--    • Arp      – chord-tone pool across a configurable octave range,
+--                 pattern (Up / Down / UpDown / Random / Chord),
+--                 stepped at a selectable rate.
+--    • Melody   – eight generation presets (free, flowing, structured,
+--                 conversational, mechanical, phrase/answer, fractal,
+--                 motif) sharing a phrase-arc tension/density envelope,
+--                 metric-weight beat scoring, diatonic voice leading,
+--                 chromatic colour (passing tones), rigidity (snap
+--                 toward chord tones), min/max note duration, metre
+--                 enforcement, and busyness (arc-shaped density /
+--                 clustering around bar / half-bar landmarks).
+--
+--  Live MIDI preview for each layer updates as parameters change.
+--  Time signature is read live at the cursor every frame; durations
+--  flow as beats and convert to PPQ only at MIDI write time.
+--  User-facing parameters persist per-project via SetProjExtState.
+--
+--  Requires: REAPER + ReaImGui extension (install via ReaPack).
 -- ============================================================
 
 local ctx = reaper.ImGui_CreateContext("Chord Generator")
