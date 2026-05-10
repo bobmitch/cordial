@@ -381,6 +381,7 @@ local state = {
   mel_oct_min      = 4,          -- minimum octave for melody
   mel_oct_max      = 5,          -- maximum octave for melody
   mel_busyness     = 45,         -- 0=sparse/long-held, 100=dense/clustered bursts
+  mel_space        = 0,          -- 0=fill the bar, 100=lots of rests, onsets pinned to quarters
   mel_cadence      = 60,         -- 0=free wander, 100=textbook cadences w/ phrase grammar
   -- Internal: derived from mel_cadence each generation pass via
   -- apply_cadence_to_legacy(). Not user-facing; readers across
@@ -502,7 +503,7 @@ local PERSIST_KEYS = {
   -- Melody layer
   "mel_enabled", "mel_track_name", "mel_channel", "mel_preset_idx",
   "mel_min_dur_idx", "mel_max_dur_idx", "mel_velocity", "mel_vel_human",
-  "mel_oct_min", "mel_oct_max", "mel_busyness", "mel_cadence",
+  "mel_oct_min", "mel_oct_max", "mel_busyness", "mel_space", "mel_cadence",
   "mel_render_cycles",
   -- Bass layer
   "bass_enabled", "bass_track_name", "bass_channel", "bass_style_idx",
@@ -1015,6 +1016,7 @@ end
 -- Returns list of {slot, weight} sorted by slot ascending.
 local function build_onset_candidates(block_slots, abs_start_slot, grid)
   local metre   = state.mel_metre / 100.0
+  local space   = (state.mel_space or 0) / 100.0
   local candidates = {}
 
   for s = 0, block_slots - 1 do
@@ -1037,6 +1039,18 @@ local function build_onset_candidates(block_slots, abs_start_slot, grid)
       else
         local admit_prob = (mw / pass_threshold) * (1 - metre)
         include = rng_float() < admit_prob
+      end
+    end
+
+    -- Space gate: pin onsets to quarter-note boundaries. Sub-beat slots
+    -- are rejected with probability proportional to space, independent of
+    -- metre. At space=1 every onset lands on a beat; at space=0, no-op.
+    if include and space > 0 then
+      local abs_beat  = (abs_start_slot + s) * grid
+      local beat_frac = abs_beat - math.floor(abs_beat)
+      local on_beat   = beat_frac < 0.01 or (1.0 - beat_frac) < 0.01
+      if not on_beat and rng_float() < space then
+        include = false
       end
     end
 
@@ -1569,6 +1583,12 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
     local density = phrase_arc_density(context, abs_beat)
     local soft = (state.mel_preset_idx == 3) and 0.5 or 1.0  -- Motif
     local rest_p = (1.0 - density) * 35.0 * soft
+    -- Space adds an independent baseline rest probability orthogonal to
+    -- busyness's arc. Strong beats stay less rest-prone (mw scaling), but
+    -- at high space even mid-bar beats inside a block can rest, opening
+    -- up the whitespace busyness alone can't reach.
+    local space = (state.mel_space or 0) / 100.0
+    rest_p = rest_p + space * 75.0 * (1.0 - 0.5 * mw)
     if first_onset    then rest_p = 0 end
     if mw >= 0.95     then rest_p = rest_p * 0.25 end
 
@@ -3216,6 +3236,9 @@ local function draw_ui()
   local mbusyc, mbusyv = sslider("Busy##mbusy", state.mel_busyness, 0, 100, 70)
   if mbusyc then state.mel_busyness = mbusyv; state.mel_live_events=nil end
   reaper.ImGui_SameLine(ctx)
+  local mspc, mspv = sslider("Space##mspace", state.mel_space, 0, 100, 70)
+  if mspc then state.mel_space = mspv; state.mel_live_events=nil end
+  reaper.ImGui_SameLine(ctx)
   local mvc, mvv = sslider("Vel##mvel", state.mel_velocity, 1, 127, 65)
   if mvc then state.mel_velocity = mvv; state.mel_live_events=nil end
   reaper.ImGui_SameLine(ctx)
@@ -3276,6 +3299,14 @@ local function draw_ui()
     state.mel_busyness < 75  and "active — shorter notes prevail, arc-shaped clustering" or
     state.mel_busyness < 100 and "busy — bursts of subdivision around bar/half-bar landmarks" or
     "very busy — dense subdivision bursts, snapped to quarter-note boundaries"))
+
+  reaper.ImGui_TextDisabled(ctx, "Space "..state.mel_space.." — "..(
+    state.mel_space == 0   and "no extra rests — fills the bar" or
+    state.mel_space < 25   and "occasional gaps between phrases" or
+    state.mel_space < 50   and "breathing room — onsets pulled toward beats" or
+    state.mel_space < 75   and "airy — frequent rests, onsets on quarters" or
+    state.mel_space < 100  and "sparse — long silences, attacks only on beats" or
+    "very sparse — pointillistic, every onset on a quarter boundary"))
   end -- mel_open
 
   -- ── Bass Layer ───────────────────────────────────────────────
