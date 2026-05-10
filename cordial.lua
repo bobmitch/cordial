@@ -420,6 +420,11 @@ local state = {
   bass_live_last_idx  = -1,
   bass_wait_boundary  = false,
 
+  -- Section open/collapsed state
+  arp_open  = true,
+  mel_open  = true,
+  bass_open = true,
+
   -- Seed / keep
   seed        = math.floor(reaper.time_precise() * 1000) % 99999,
   seed_str    = "",
@@ -499,6 +504,8 @@ local PERSIST_KEYS = {
   "bass_enabled", "bass_track_name", "bass_channel", "bass_style_idx",
   "bass_oct", "bass_follow_inv", "bass_velocity", "bass_vel_human",
   "bass_gate", "bass_approach_prob", "bass_pattern_steps", "bass_pattern_grid_idx",
+  -- Section open state
+  "arp_open", "mel_open", "bass_open",
   -- Seed / PPQ
   "seed", "seed_locked", "ppq_per_beat",
 }
@@ -3218,7 +3225,9 @@ local function draw_ui()
   if cvc then state.chord_velocity = cvv end
 
   -- ── Arp Layer ────────────────────────────────────────────────
-  reaper.ImGui_SeparatorText(ctx, "Arp Layer")
+  reaper.ImGui_SetNextItemOpen(ctx, state.arp_open, reaper.ImGui_Cond_Once())
+  state.arp_open = reaper.ImGui_CollapsingHeader(ctx, "Arp Layer")
+  if state.arp_open then
   local lac, lav = reaper.ImGui_Checkbox(ctx, "Enabled##arp", state.arp_enabled)
   if lac then state.arp_enabled = lav end
   reaper.ImGui_SameLine(ctx)
@@ -3274,10 +3283,12 @@ local function draw_ui()
   if abnc then state.arp_beatn_prob = abnv; state.arp_live_events = nil end
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_TextDisabled(ctx, "  global: "..state.arp_note_prob.."%")
+  end -- arp_open
 
   -- ── Melody Layer ─────────────────────────────────────────────
-  reaper.ImGui_SeparatorText(ctx, "Melody Layer")
-
+  reaper.ImGui_SetNextItemOpen(ctx, state.mel_open, reaper.ImGui_Cond_Once())
+  state.mel_open = reaper.ImGui_CollapsingHeader(ctx, "Melody Layer")
+  if state.mel_open then
   local mlc, mlv = reaper.ImGui_Checkbox(ctx, "Enabled##melenabled", state.mel_enabled)
   if mlc then state.mel_enabled = mlv end
   reaper.ImGui_SameLine(ctx)
@@ -3375,9 +3386,12 @@ local function draw_ui()
     state.mel_busyness < 75  and "active — shorter notes prevail, arc-shaped clustering" or
     state.mel_busyness < 100 and "busy — bursts of subdivision around bar/half-bar landmarks" or
     "very busy — dense subdivision bursts, snapped to quarter-note boundaries"))
+  end -- mel_open
 
   -- ── Bass Layer ───────────────────────────────────────────────
-  reaper.ImGui_SeparatorText(ctx, "Bass Layer")
+  reaper.ImGui_SetNextItemOpen(ctx, state.bass_open, reaper.ImGui_Cond_Once())
+  state.bass_open = reaper.ImGui_CollapsingHeader(ctx, "Bass Layer")
+  if state.bass_open then
   local blc, blv = reaper.ImGui_Checkbox(ctx, "Enabled##bass", state.bass_enabled)
   if blc then state.bass_enabled = blv; state.bass_live_events = nil end
   reaper.ImGui_SameLine(ctx)
@@ -3427,6 +3441,7 @@ local function draw_ui()
       end
     end
   end
+  end -- bass_open
 
   -- ── Live Preview ─────────────────────────────────────────────
   reaper.ImGui_SeparatorText(ctx, "Live Preview")
