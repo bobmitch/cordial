@@ -301,7 +301,7 @@ local ACCENT_GRID = {
 local ACCENT_GRID_NAMES = {}
 for _, g in ipairs(ACCENT_GRID) do ACCENT_GRID_NAMES[#ACCENT_GRID_NAMES+1] = g.label end
 
-local ARP_PATTERNS = {"Up","Down","Up-Down","Down-Up","Random","Chord"}
+local ARP_PATTERNS = {"Up","Down","Up-Down","Down-Up","Random","Chord","Weave","Pedal","Skip"}
 
 -- Melody duration grid — all valid note lengths in beats (quarter = 1 beat)
 local MEL_DURATIONS = {
@@ -1932,6 +1932,30 @@ local function apply_arp_pattern(pool, pattern_name, rng_seq)
       local j = math.max(1, math.floor(rng_seq[i] * i) + 1)
       r[i], r[j] = r[j], r[i]
     end
+    return r
+  elseif pattern_name == "Weave" then
+    -- two forward, one back: 1,3,2,4,3,5,4,6...
+    local r = {}
+    for i = 1, #pool - 2 do
+      r[#r+1] = pool[i]
+      r[#r+1] = pool[i + 2]
+    end
+    if #r == 0 then return pool end
+    return r
+  elseif pattern_name == "Pedal" then
+    -- root pedal between each upper note: 1,2,1,3,1,4,1,5...
+    local r = {}
+    for i = 2, #pool do
+      r[#r+1] = pool[1]
+      r[#r+1] = pool[i]
+    end
+    if #r == 0 then return pool end
+    return r
+  elseif pattern_name == "Skip" then
+    -- odd indices then even: 1,3,5..., 2,4,6... (diatonic thirds)
+    local r = {}
+    for i = 1, #pool, 2 do r[#r+1] = pool[i] end
+    for i = 2, #pool, 2 do r[#r+1] = pool[i] end
     return r
   end
   return pool
