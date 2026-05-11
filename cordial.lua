@@ -807,8 +807,8 @@ local function build_progression()
   local mode      = MODE_NAMES[state.mode_idx]
   local qualities = MODE_CHORDS[mode]
   local num       = state.timesig_num
-  local result    = {}
-  local prev_bass = nil
+  local result     = {}
+  local prev_notes = nil   -- previous chord's full close-position voicing
   for i, deg in ipairs(degrees) do
     -- Quality: use per-chord override if set, else mode default
     local override = state.chord_quality_overrides[i]
@@ -820,16 +820,32 @@ local function build_progression()
     local dur_bars = state.chord_durations[i]  or 1
     local dur_beats = bars_to_beats(dur_bars, num)
 
-    -- Smart voicing: pick rotation that minimises bass leap from previous
-    -- chord. Skipped when the user/preset has set an explicit non-zero
+    -- Smart voicing: pick rotation that minimises total voice motion from
+    -- the previous chord, with extra weight on the top voice (the ear
+    -- tracks it most) and a soft pull keeping the top inside a comfortable
+    -- register. Skipped when the user/preset has set an explicit non-zero
     -- rotation OR a slash bass for this slot, and skipped on chord 1.
     local inv = user_inv
-    if state.smart_voicing and i > 1 and user_inv == 0 and not slash_midi and prev_bass then
+    if state.smart_voicing and i > 1 and user_inv == 0 and not slash_midi and prev_notes then
       local ivs_count = #(CHORD_INTERVALS[quality] or {0})
       local best, best_d = 0, math.huge
+      local prev_top = prev_notes[#prev_notes]
       for cand = 0, math.min(ivs_count - 1, 3) do
         local cand_notes = build_chord(root_m, quality, cand)
-        local d = math.abs(cand_notes[1] - prev_bass)
+        local pairs_n    = math.min(#cand_notes, #prev_notes)
+        -- Weighted sum of per-voice semitone motion. Voices paired in
+        -- ascending order — close-position triads stay register-aligned.
+        local d = 0
+        for v = 1, pairs_n do
+          local w = (v == pairs_n) and 1.5 or 1.0   -- emphasise soprano
+          d = d + w * math.abs(cand_notes[v] - prev_notes[v])
+        end
+        -- Soft register penalty: discourage the top voice straying far
+        -- from where it just was, beyond a tolerance built into the
+        -- weighting above. Keeps voicings from crawling up the keyboard.
+        local top = cand_notes[#cand_notes]
+        local drift = math.abs(top - prev_top)
+        if drift > 7 then d = d + 0.75 * (drift - 7) end
         if d < best_d then best, best_d = cand, d end
       end
       inv = best
@@ -867,7 +883,7 @@ local function build_progression()
       is_override = override ~= nil,
       label      = label,
     }
-    prev_bass = bass_midi
+    prev_notes = notes   -- chord tones only; slash bass excluded from voice-leading metric
   end
   return result
 end
