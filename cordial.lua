@@ -143,6 +143,7 @@ local PROGRESSIONS = {
   {cat="Pop/Folk",  name="vi  iii  IV  I (lo-fi)",                 degrees={6,3,4,1},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Pop/Folk",  name="I  V  vi  IV  I  V  IV  IV (8-bar)",     degrees={1,5,6,4,1,5,4,4}, qualities={nil,nil,nil,nil,nil,nil,nil,nil},       mode="major"},
   {cat="Pop/Folk",  name="I  IV  I  V (folk)",                     degrees={1,4,1,5},         qualities={nil,nil,nil,nil},                       mode="major"},
+  {cat="Pop/Folk",  name="I  vi7 IVadd9 iii7 (so true)",           degrees={1,6,4,3},         qualities={"maj7","min7","add9","min7"},            mode="major"},
 
   -- ── Ambient / Sus ────────────────────────────────────────────
   {cat="Ambient",   name="I  Vsus4  I  IVsus2",                    degrees={1,5,1,4},         qualities={"maj","sus4","maj","sus2"},             mode="major"},
