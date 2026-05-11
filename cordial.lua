@@ -126,8 +126,8 @@ local SCALE_INTERVALS = {
 local PROGRESSIONS = {
   -- ── Diatonic (Major-key staples) ─────────────────────────────
   {cat="Diatonic",  name="I  IV  V  I",                            degrees={1,4,5,1},         qualities={nil,nil,nil,nil},                       mode="major"},
-  {cat="Diatonic",  name="I  V  vi  IV (Axis)",                    degrees={1,5,6,4},         qualities={nil,nil,nil,nil},                       mode="major"},
-  {cat="Diatonic",  name="I  IV  vi  V",                           degrees={1,4,6,5},         qualities={nil,nil,nil,nil},                       mode="major"},
+  {cat="Diatonic",  name="I  V  vi  IV (Axis, desc bass)",         degrees={1,5,6,4},         qualities={nil,nil,nil,nil},                       mode="major", inversions={0,1,0,0}},
+  {cat="Diatonic",  name="I  IV  vi  V (cadential)",               degrees={1,4,6,5},         qualities={nil,nil,nil,nil},                       mode="major", inversions={0,0,0,1}},
   {cat="Diatonic",  name="ii  V  I  I",                            degrees={2,5,1,1},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Diatonic",  name="I  vi  IV  V (50s)",                     degrees={1,6,4,5},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Diatonic",  name="vi  IV  I  V",                           degrees={6,4,1,5},         qualities={nil,nil,nil,nil},                       mode="major"},
@@ -141,16 +141,19 @@ local PROGRESSIONS = {
 
   -- ── Pop / Folk / Singer-Songwriter ───────────────────────────
   {cat="Pop/Folk",  name="I  V  IV  V",                            degrees={1,5,4,5},         qualities={nil,nil,nil,nil},                       mode="major"},
-  {cat="Pop/Folk",  name="I  iii  vi  IV",                         degrees={1,3,6,4},         qualities={nil,nil,nil,nil},                       mode="major"},
+  {cat="Pop/Folk",  name="I  iii  vi  IV (stepwise desc bass)",    degrees={1,3,6,4},         qualities={nil,nil,nil,nil},                       mode="major", inversions={0,2,0,"5"}},
   {cat="Pop/Folk",  name="vi  V  IV  V (descending)",              degrees={6,5,4,5},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Pop/Folk",  name="I  V  vi  iii",                          degrees={1,5,6,3},         qualities={nil,nil,nil,nil},                       mode="major", inversions={0,1,0,1}},
   {cat="Pop/Folk",  name="I  IV  vi  iii",                         degrees={1,4,6,3},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Pop/Folk",  name="I  V/vi  vi  IV",                        degrees={1,3,6,4},         qualities={"maj","dom7","min","maj"},              mode="major"},
-  {cat="Pop/Folk",  name="vi  IV  V  I (uplift)",                  degrees={6,4,5,1},         qualities={nil,nil,nil,nil},                       mode="major"},
+  {cat="Pop/Folk",  name="vi  IV  V  I (uplift, walking bass)",    degrees={6,4,5,1},         qualities={nil,nil,nil,nil},                       mode="major", inversions={0,0,1,0}},
   {cat="Pop/Folk",  name="vi  iii  IV  I (lo-fi)",                 degrees={6,3,4,1},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Pop/Folk",  name="I  V  vi  IV  I  V  IV  IV (8-bar)",     degrees={1,5,6,4,1,5,4,4}, qualities={nil,nil,nil,nil,nil,nil,nil,nil},       mode="major"},
   {cat="Pop/Folk",  name="I  IV  I  V (folk)",                     degrees={1,4,1,5},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Pop/Folk",  name="I  vi7 IVadd9 iii7 (so true)",           degrees={1,6,4,3},         qualities={"maj7","min7","add9","min7"},            mode="major", inversions={2,0,1,1}},
+  {cat="Pop/Folk",  name="I  V  vi  I  IV (long descending bass)", degrees={1,5,6,1,4},       qualities={nil,nil,nil,nil,nil},                   mode="major", inversions={0,1,0,2,0}},
+  {cat="Pop/Folk",  name="I  II  IV  V (Lydian lift, pedal)",      degrees={1,2,4,5},         qualities={"maj","maj","maj","maj"},               mode="major", inversions={0,"1",0,0}},
+  {cat="Pop/Folk",  name="I  v  bVII  IV (Toto Africa)",           degrees={1,5,7,4},         qualities={"add9","min7","add9","maj"},            mode="mixolydian"},
 
   -- ── Ambient / Sus ────────────────────────────────────────────
   {cat="Ambient",   name="I  Vsus4  I  IVsus2",                    degrees={1,5,1,4},         qualities={"maj","sus4","maj","sus2"},             mode="major"},
@@ -162,6 +165,7 @@ local PROGRESSIONS = {
   {cat="Ambient",   name="Imaj9  IVmaj9  iii7  vi9",               degrees={1,4,3,6},         qualities={"maj9","maj9","min7","min9"},           mode="major"},
   {cat="Ambient",   name="Imaj7  IImaj7  Imaj7  IImaj7 (Lyd float)",degrees={1,2,1,2},        qualities={"maj7","maj7","maj7","maj7"},           mode="lydian"},
   {cat="Ambient",   name="Imaj7  bVIImaj7  IVmaj7  Imaj7 (Mixo)",  degrees={1,7,4,1},         qualities={"maj7","maj7","maj7","maj7"},           mode="mixolydian"},
+  {cat="Ambient",   name="Imaj7  IVmaj7 (tonic pedal float)",      degrees={1,4},             qualities={"maj7","maj7"},                         mode="major", inversions={0,"1"}},
 
   -- ── Neo-Soul / R&B ───────────────────────────────────────────
   {cat="Neo-Soul",  name="Imaj7  IVmaj7  iii7  vi7",               degrees={1,4,3,6},         qualities={"maj7","maj7","min7","min7"},           mode="major"},
@@ -175,7 +179,7 @@ local PROGRESSIONS = {
   {cat="Neo-Soul",  name="iii7  vi7  ii9  V13",                    degrees={3,6,2,5},         qualities={"min7","min7","min9","dom9"},           mode="major"},
 
   -- ── Jazz ─────────────────────────────────────────────────────
-  {cat="Jazz",      name="Imaj7  vi7  ii7  V7 (turnaround)",       degrees={1,6,2,5},         qualities={"maj7","min7","min7","dom7"},           mode="major"},
+  {cat="Jazz",      name="Imaj7  vi7  ii7  V7 (turnaround)",       degrees={1,6,2,5},         qualities={"maj7","min7","min7","dom7"},           mode="major", inversions={0,0,0,1}},
   {cat="Jazz",      name="ii7  V7  Imaj7  Imaj7",                  degrees={2,5,1,1},         qualities={"min7","dom7","maj7","maj7"},           mode="major"},
   {cat="Jazz",      name="iii7  vi7  ii7  V7",                     degrees={3,6,2,5},         qualities={"min7","min7","min7","dom7"},           mode="major"},
   {cat="Jazz",      name="Imaj7  IV7  iii7  bVII7 (backdoor)",     degrees={1,4,3,7},         qualities={"maj7","dom7","min7","dom7"},           mode="mixolydian"},
@@ -204,6 +208,7 @@ local PROGRESSIONS = {
   {cat="Gospel",    name="I  IV  ii  V7 (turnaround)",             degrees={1,4,2,5},         qualities={"maj","maj","min","dom7"},              mode="major"},
   {cat="Gospel",    name="I  vi  ii  V7 (gospel circle)",          degrees={1,6,2,5},         qualities={"maj","min","min","dom7"},              mode="major"},
   {cat="Gospel",    name="iii7  vi7  ii7  V7",                     degrees={3,6,2,5},         qualities={"min7","min7","min7","dom7"},           mode="major"},
+  {cat="Gospel",    name="I  I  IV  IV  V7 (walking bass up)",     degrees={1,1,4,4,5},       qualities={"maj","maj","maj","maj","dom7"},        mode="major", inversions={0,1,0,"5",0}},
 
   -- ── Blues ────────────────────────────────────────────────────
   {cat="Blues",     name="12-bar I7-IV7-I7-V7-IV7-I7-V7",          degrees={1,1,1,1,4,4,1,1,5,4,1,5}, qualities={"dom7","dom7","dom7","dom7","dom7","dom7","dom7","dom7","dom7","dom7","dom7","dom7"}, mode="mixolydian"},
@@ -218,6 +223,7 @@ local PROGRESSIONS = {
   {cat="Funk",      name="ii7  V7  ii7  V7 (vamp)",                degrees={2,5,2,5},         qualities={"min7","dom7","min7","dom7"},           mode="major"},
   {cat="Funk",      name="I7 vamp (one-chord)",                    degrees={1,1,1,1},         qualities={"dom7","dom7","dom7","dom7"},           mode="mixolydian"},
   {cat="Funk",      name="im7  bIII7  bVII7  IV7",                 degrees={1,3,7,4},         qualities={"min7","dom7","dom7","dom7"},           mode="dorian"},
+  {cat="Funk",      name="im9  bVII7 (Funk tonic pedal)",          degrees={1,7},             qualities={"min9","dom7"},                         mode="dorian", inversions={0,"1"}},
 
   -- ── Rock ─────────────────────────────────────────────────────
   {cat="Rock",      name="I  bVII  IV  I (classic)",               degrees={1,7,4,1},         qualities={"maj","maj","maj","maj"},               mode="mixolydian"},
@@ -255,7 +261,7 @@ local PROGRESSIONS = {
 
   -- ── Latin / Bossa Nova ───────────────────────────────────────
   {cat="Latin",     name="ii7  V7  Imaj7  Imaj7 (bossa)",          degrees={2,5,1,1},         qualities={"min7","dom7","maj7","maj7"},           mode="major"},
-  {cat="Latin",     name="Imaj7  VI7  ii7  V7 (bossa turn)",       degrees={1,6,2,5},         qualities={"maj7","dom7","min7","dom7"},           mode="major"},
+  {cat="Latin",     name="Imaj7  VI7  ii7  V7 (bossa turn)",       degrees={1,6,2,5},         qualities={"maj7","dom7","min7","dom7"},           mode="major", inversions={0,0,0,1}},
   {cat="Latin",     name="ii7  V7  iii7  VI7 (bossa cycle)",       degrees={2,5,3,6},         qualities={"min7","dom7","min7","dom7"},           mode="major"},
   {cat="Latin",     name="Imaj7  VI7  ii7  V7  iii7  VI7  ii7  V7",degrees={1,6,2,5,3,6,2,5}, qualities={"maj7","dom7","min7","dom7","min7","dom7","min7","dom7"}, mode="major"},
   {cat="Latin",     name="i  bVII  bVI  V (Andalusian)",           degrees={1,7,6,5},         qualities={"min","maj","maj","maj"},               mode="phrygian"},
@@ -279,8 +285,9 @@ local PROGRESSIONS = {
   {cat="Cinematic", name="i  bIII  bVI  bVII",                     degrees={1,3,6,7},         qualities={"min","maj","maj","maj"},               mode="minor"},
   {cat="Cinematic", name="Iaug  bVI  bVII  i (epic)",              degrees={1,6,7,1},         qualities={"aug","maj","maj","min"},               mode="minor"},
   {cat="Cinematic", name="i  bII  i  V7 (Phrygian dom)",           degrees={1,2,1,5},         qualities={"min","maj","min","dom7"},              mode="phrygian"},
-  {cat="Cinematic", name="i  bIII  iv  bVI (lament)",              degrees={1,3,4,6},         qualities={"min","maj","min","maj"},               mode="minor"},
+  {cat="Cinematic", name="i  bIII  iv  bVI (lament, walking)",     degrees={1,3,4,6},         qualities={"min","maj","min","maj"},               mode="minor", inversions={0,2,1,"5"}},
   {cat="Cinematic", name="i  V/iv  iv  V (trailer build)",         degrees={1,1,4,5},         qualities={"min","dom7","min","maj"},              mode="harmonic_minor"},
+  {cat="Cinematic", name="i  i  i  IV (Stairway descent)",         degrees={1,1,1,4},         qualities={"min","min","min","maj"},               mode="minor", inversions={0,"#7","7",1}},
 
   -- ── Modal Colour ─────────────────────────────────────────────
   {cat="Modal",     name="i  bII  bVII  i (Phrygian)",             degrees={1,2,7,1},         qualities={"min","maj","maj","min"},               mode="phrygian"},
@@ -303,6 +310,7 @@ local PROGRESSIONS = {
   {cat="Classical", name="i  iv  V7  i (minor cadence)",           degrees={1,4,5,1},         qualities={"min","min","dom7","min"},              mode="harmonic_minor"},
   {cat="Classical", name="I  vi  IV  V  I (extended cadence)",     degrees={1,6,4,5,1},       qualities={nil,nil,nil,nil,nil},                   mode="major"},
   {cat="Classical", name="I  V/V  V  I (secondary dom)",           degrees={1,2,5,1},         qualities={"maj","dom7","maj","maj"},              mode="major"},
+  {cat="Classical", name="i  V7  iv  V7 (voice-led lament)",       degrees={1,5,4,5},         qualities={"min","dom7","min","dom7"},             mode="harmonic_minor", inversions={0,"7",1,0}},
 
   -- ── Custom ───────────────────────────────────────────────────
   {cat="Custom",    name="Custom",                                 degrees={},                qualities={},                                      mode=nil},
