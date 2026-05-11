@@ -106,6 +106,13 @@ local SCALE_INTERVALS = {
 --    mode     = (optional) mode key from MODE_NAMES; auto-applied
 --               when the preset is selected so chord roots come out
 --               correct for any borrowed/modal labels in `name`.
+--    inversions = (optional) per-slot voicing override. Each entry is
+--               nil    → root position
+--               int N  → Nth rotation (1 = 1st inv, 2 = 2nd inv, …)
+--               string → slash-bass on a key scale degree, e.g. "3",
+--                        "b7", "#4". Slash bass is an *added* low
+--                        note (handles non-chord-tone bass like
+--                        IV/1 pedal), independent of rotation.
 --
 --  nil quality means "use whatever the current mode dictates".
 --  A non-nil quality overrides the mode for that chord slot.
@@ -129,21 +136,21 @@ local PROGRESSIONS = {
   {cat="Diatonic",  name="I  vi  ii  V",                           degrees={1,6,2,5},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Diatonic",  name="I  IV  ii  V",                           degrees={1,4,2,5},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Diatonic",  name="vi  ii  V  I (circle)",                  degrees={6,2,5,1},         qualities={nil,nil,nil,nil},                       mode="major"},
-  {cat="Diatonic",  name="I  V  vi  iii  IV  I  IV  V (Pachelbel)",degrees={1,5,6,3,4,1,4,5}, qualities={nil,nil,nil,nil,nil,nil,nil,nil},       mode="major"},
+  {cat="Diatonic",  name="I  V  vi  iii  IV  I  IV  V (Pachelbel)",degrees={1,5,6,3,4,1,4,5}, qualities={nil,nil,nil,nil,nil,nil,nil,nil},       mode="major", inversions={0,1,0,1,0,1,0,0}},
   {cat="Diatonic",  name="I  IV  V  vi (deceptive)",               degrees={1,4,5,6},         qualities={nil,nil,nil,nil},                       mode="major"},
 
   -- ── Pop / Folk / Singer-Songwriter ───────────────────────────
   {cat="Pop/Folk",  name="I  V  IV  V",                            degrees={1,5,4,5},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Pop/Folk",  name="I  iii  vi  IV",                         degrees={1,3,6,4},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Pop/Folk",  name="vi  V  IV  V (descending)",              degrees={6,5,4,5},         qualities={nil,nil,nil,nil},                       mode="major"},
-  {cat="Pop/Folk",  name="I  V  vi  iii",                          degrees={1,5,6,3},         qualities={nil,nil,nil,nil},                       mode="major"},
+  {cat="Pop/Folk",  name="I  V  vi  iii",                          degrees={1,5,6,3},         qualities={nil,nil,nil,nil},                       mode="major", inversions={0,1,0,1}},
   {cat="Pop/Folk",  name="I  IV  vi  iii",                         degrees={1,4,6,3},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Pop/Folk",  name="I  V/vi  vi  IV",                        degrees={1,3,6,4},         qualities={"maj","dom7","min","maj"},              mode="major"},
   {cat="Pop/Folk",  name="vi  IV  V  I (uplift)",                  degrees={6,4,5,1},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Pop/Folk",  name="vi  iii  IV  I (lo-fi)",                 degrees={6,3,4,1},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Pop/Folk",  name="I  V  vi  IV  I  V  IV  IV (8-bar)",     degrees={1,5,6,4,1,5,4,4}, qualities={nil,nil,nil,nil,nil,nil,nil,nil},       mode="major"},
   {cat="Pop/Folk",  name="I  IV  I  V (folk)",                     degrees={1,4,1,5},         qualities={nil,nil,nil,nil},                       mode="major"},
-  {cat="Pop/Folk",  name="I  vi7 IVadd9 iii7 (so true)",           degrees={1,6,4,3},         qualities={"maj7","min7","add9","min7"},            mode="major"},
+  {cat="Pop/Folk",  name="I  vi7 IVadd9 iii7 (so true)",           degrees={1,6,4,3},         qualities={"maj7","min7","add9","min7"},            mode="major", inversions={2,0,1,1}},
 
   -- ── Ambient / Sus ────────────────────────────────────────────
   {cat="Ambient",   name="I  Vsus4  I  IVsus2",                    degrees={1,5,1,4},         qualities={"maj","sus4","maj","sus2"},             mode="major"},
@@ -221,7 +228,7 @@ local PROGRESSIONS = {
   {cat="Rock",      name="i  bVI  bIII  bVII (epic)",              degrees={1,6,3,7},         qualities={"min","maj","maj","maj"},               mode="minor"},
   {cat="Rock",      name="I5  IV5  V5 (power chords)",             degrees={1,4,5},           qualities={"5","5","5"},                           mode="major"},
   {cat="Rock",      name="i5  bVII5  bVI5  bVII5",                 degrees={1,7,6,7},         qualities={"5","5","5","5"},                       mode="minor"},
-  {cat="Rock",      name="I  V  vi  iii  IV  I  IV  V (rock Pachelbel)", degrees={1,5,6,3,4,1,4,5}, qualities={nil,nil,nil,nil,nil,nil,nil,nil}, mode="major"},
+  {cat="Rock",      name="I  V  vi  iii  IV  I  IV  V (rock Pachelbel)", degrees={1,5,6,3,4,1,4,5}, qualities={nil,nil,nil,nil,nil,nil,nil,nil}, mode="major", inversions={0,1,0,1,0,1,0,0}},
 
   -- ── Post-Hardcore / Metal ────────────────────────────────────
   {cat="Metal",     name="i5  bII5  i5  bII5 (Phrygian)",          degrees={1,2,1,2},         qualities={"5","5","5","5"},                       mode="phrygian"},
@@ -287,7 +294,7 @@ local PROGRESSIONS = {
 
   -- ── Classical ────────────────────────────────────────────────
   {cat="Classical", name="I  IV  V  I (perfect cadence)",          degrees={1,4,5,1},         qualities={nil,nil,nil,nil},                       mode="major"},
-  {cat="Classical", name="I  V  vi  iii  IV  I  IV  V (Pachelbel)",degrees={1,5,6,3,4,1,4,5}, qualities={nil,nil,nil,nil,nil,nil,nil,nil},       mode="major"},
+  {cat="Classical", name="I  V  vi  iii  IV  I  IV  V (Pachelbel)",degrees={1,5,6,3,4,1,4,5}, qualities={nil,nil,nil,nil,nil,nil,nil,nil},       mode="major", inversions={0,1,0,1,0,1,0,0}},
   {cat="Classical", name="I  IV  V  vi (deceptive)",               degrees={1,4,5,6},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Classical", name="I  IV  I (plagal/amen)",                 degrees={1,4,1},           qualities={nil,nil,nil},                           mode="major"},
   {cat="Classical", name="i  iv  V7  I (Picardy)",                 degrees={1,4,5,1},         qualities={"min","min","dom7","maj"},              mode="harmonic_minor"},
@@ -376,6 +383,17 @@ local state = {
   chord_durations  = {},
   chord_inversions = {},
   chord_quality_overrides = {},  -- nil entry = follow mode; string = override quality
+  -- Per-slot slash-bass override: nil = none; string like "3", "b7", "#4"
+  -- = scale-degree-of-the-key bass placed below the chord. Independent of
+  -- chord_inversions (rotation): a slash bass is an *added* low note, not a
+  -- rotation. Non-chord-tone slashes (e.g. F/G) are how pedal/inverted-bass
+  -- moves are spelled.
+  chord_bass_overrides = {},
+  -- When true, build_progression auto-picks a rotation that minimises bass
+  -- leap from the previous chord, for any slot the user/preset hasn't
+  -- explicitly inverted or slashed. Non-destructive: state.chord_inversions
+  -- is not mutated.
+  smart_voicing    = false,
 
   -- Chord layer
   chord_track_name = "Chords",
@@ -498,10 +516,12 @@ local function init_chord_arrays(n)
   state.chord_durations       = {}
   state.chord_inversions      = {}
   state.chord_quality_overrides = {}
+  state.chord_bass_overrides  = {}
   for i = 1, n do
     state.chord_durations[i]        = 1
     state.chord_inversions[i]       = 0
     state.chord_quality_overrides[i] = nil  -- auto = follow mode
+    state.chord_bass_overrides[i]    = nil  -- no slash bass
   end
 end
 
@@ -514,8 +534,30 @@ local function load_preset_qualities(preset, n)
     state.chord_quality_overrides[i] = q  -- nil or quality string
   end
 end
+
+-- Load inversions / slash-bass overrides from a preset's `inversions` array.
+-- Each entry is one of:
+--   nil       → root position
+--   integer N → rotate chord N times (Nth inversion)
+--   string    → slash-bass spec like "3", "b7", "#4" (scale degree of key,
+--               with optional accidental). Stored in chord_bass_overrides.
+local function load_preset_inversions(preset, n)
+  state.chord_inversions     = {}
+  state.chord_bass_overrides = {}
+  for i = 1, n do
+    state.chord_inversions[i]     = 0
+    state.chord_bass_overrides[i] = nil
+    local v = preset.inversions and preset.inversions[i]
+    if type(v) == "number" then
+      state.chord_inversions[i] = math.max(0, math.floor(v))
+    elseif type(v) == "string" and v ~= "" then
+      state.chord_bass_overrides[i] = v
+    end
+  end
+end
 init_chord_arrays(4)
 load_preset_qualities(PROGRESSIONS[state.prog_idx], 4)
+load_preset_inversions(PROGRESSIONS[state.prog_idx], 4)
 state.seed_str = tostring(state.seed)
 
 -- ----------------------------------------------------------------
@@ -547,6 +589,8 @@ local PERSIST_KEYS = {
   "arp_open", "mel_open", "bass_open",
   -- Seed / PPQ
   "seed", "seed_locked", "ppq_per_beat",
+  -- Voicing
+  "smart_voicing",
 }
 
 local EXT_NS = "cordial"  -- namespace for SetProjExtState
@@ -599,6 +643,10 @@ local function save_proj_state()
   local qparts = {}
   for i = 1, nd do qparts[i] = state.chord_quality_overrides[i] or "" end
   reaper.SetProjExtState(0, EXT_NS, "chord_quality_overrides", table.concat(qparts, ","))
+  -- slash bass overrides: nil entries serialised as ""
+  local bparts = {}
+  for i = 1, nd do bparts[i] = state.chord_bass_overrides[i] or "" end
+  reaper.SetProjExtState(0, EXT_NS, "chord_bass_overrides", table.concat(bparts, ","))
   -- custom degrees
   reaper.SetProjExtState(0, EXT_NS, "custom_degrees_n", tostring(#state.custom_degrees))
   reaper.SetProjExtState(0, EXT_NS, "custom_degrees",   arr_to_str(state.custom_degrees))
@@ -650,6 +698,17 @@ local function load_proj_state()
     for tok in (val..","):gmatch("([^,]*),") do
       i = i + 1
       state.chord_quality_overrides[i] = (tok ~= "") and tok or nil
+      if i >= nd then break end
+    end
+  end
+
+  ok, val = reaper.GetProjExtState(0, EXT_NS, "chord_bass_overrides")
+  if ok and val ~= "" then
+    state.chord_bass_overrides = {}
+    local i = 0
+    for tok in (val..","):gmatch("([^,]*),") do
+      i = i + 1
+      state.chord_bass_overrides[i] = (tok ~= "") and tok or nil
       if i >= nd then break end
     end
   end
@@ -719,6 +778,25 @@ local function build_chord(root_midi, quality, inversion)
   return notes
 end
 
+-- Parse a slash-bass spec like "3", "b7", "#4" against the current key.
+-- Returns the MIDI pitch placed below the supplied chord_root_midi (within
+-- one octave of it). Returns nil for invalid specs.
+local function slash_bass_midi(spec, root_idx, mode, octave, chord_root_midi)
+  if type(spec) ~= "string" or spec == "" then return nil end
+  local accidental, deg_str = spec:match("^([b#]?)([1-7])$")
+  if not deg_str then return nil end
+  local deg = tonumber(deg_str)
+  local semis = SCALE_INTERVALS[mode][deg]
+  if not semis then return nil end
+  if accidental == "b" then semis = semis - 1
+  elseif accidental == "#" then semis = semis + 1 end
+  local p = midi_note(root_idx, octave) + semis
+  -- Sit the bass below the chord root (within one octave).
+  while p >= chord_root_midi do p = p - 12 end
+  while p < chord_root_midi - 12 do p = p + 12 end
+  return p
+end
+
 local function current_degrees()
   local p = PROGRESSIONS[state.prog_idx]
   return (p.name == "Custom") and state.custom_degrees or p.degrees
@@ -730,30 +808,66 @@ local function build_progression()
   local qualities = MODE_CHORDS[mode]
   local num       = state.timesig_num
   local result    = {}
+  local prev_bass = nil
   for i, deg in ipairs(degrees) do
     -- Quality: use per-chord override if set, else mode default
     local override = state.chord_quality_overrides[i]
     local quality  = override or qualities[deg] or "maj"
     local root_m   = degree_root_midi(state.root_idx, mode, deg, state.octave)
-    local inv      = state.chord_inversions[i] or 0
+    local user_inv = state.chord_inversions[i] or 0
+    local slash    = state.chord_bass_overrides[i]
+    local slash_midi = slash_bass_midi(slash, state.root_idx, mode, state.octave, root_m)
     local dur_bars = state.chord_durations[i]  or 1
     local dur_beats = bars_to_beats(dur_bars, num)
-    local notes    = build_chord(root_m, quality, inv)
-    local root_name = NOTE_NAMES[(root_m % 12) + 1]
-    local override_marker = override and ("*"..override) or ""
+
+    -- Smart voicing: pick rotation that minimises bass leap from previous
+    -- chord. Skipped when the user/preset has set an explicit non-zero
+    -- rotation OR a slash bass for this slot, and skipped on chord 1.
+    local inv = user_inv
+    if state.smart_voicing and i > 1 and user_inv == 0 and not slash_midi and prev_bass then
+      local ivs_count = #(CHORD_INTERVALS[quality] or {0})
+      local best, best_d = 0, math.huge
+      for cand = 0, math.min(ivs_count - 1, 3) do
+        local cand_notes = build_chord(root_m, quality, cand)
+        local d = math.abs(cand_notes[1] - prev_bass)
+        if d < best_d then best, best_d = cand, d end
+      end
+      inv = best
+    end
+
+    local notes      = build_chord(root_m, quality, inv)
+    local voicing    = notes
+    local bass_midi  = notes[1]
+    if slash_midi then
+      voicing = {slash_midi}
+      for _, n in ipairs(notes) do voicing[#voicing+1] = n end
+      bass_midi = slash_midi
+    end
+    local root_name  = NOTE_NAMES[(root_m % 12) + 1]
+    local bass_name  = (slash_midi or bass_midi ~= notes[1])
+                       and NOTE_NAMES[(bass_midi % 12) + 1] or nil
+    local label = root_name.." "..quality
+    if slash_midi then
+      label = label.."/"..NOTE_NAMES[(slash_midi % 12) + 1]
+    elseif inv > 0 then
+      label = label.." inv"..inv
+    end
+    if override then label = label.." *" end
     result[#result+1] = {
-      notes     = notes,
-      quality   = quality,
-      degree    = deg,
-      duration  = dur_beats,
-      dur_bars  = dur_bars,
-      inversion = inv,
-      root_midi = root_m,                 -- root regardless of inversion
-      bass_midi = notes[1],               -- actual bass after inversion
+      notes      = notes,        -- chord tones (rotated) — used by arp/melody
+      voicing    = voicing,      -- full strum incl. slash bass — used by chord layer
+      quality    = quality,
+      degree     = deg,
+      duration   = dur_beats,
+      dur_bars   = dur_bars,
+      inversion  = inv,
+      slash_bass = slash,        -- spec string or nil
+      root_midi  = root_m,                 -- root regardless of inversion
+      bass_midi  = bass_midi,              -- actual lowest sounded pitch
       is_override = override ~= nil,
-      label    = root_name.." "..quality..(inv>0 and (" inv"..inv) or "")
-                 ..(override and " *" or ""),
+      label      = label,
     }
+    prev_bass = bass_midi
   end
   return result
 end
@@ -2348,7 +2462,7 @@ local function live_preview_tick(progression)
   end
   if chord_idx == state.last_chord_idx then return end
   live_notes_off()
-  live_notes_on(progression[chord_idx].notes)
+  live_notes_on(progression[chord_idx].voicing)
   state.last_chord_idx = chord_idx
 end
 
@@ -2660,6 +2774,9 @@ local function save_settings_to_file()
   local qparts = {}
   for i = 1, nd do qparts[i] = state.chord_quality_overrides[i] or "" end
   f:write("chord_quality_overrides=" .. table.concat(qparts, ",") .. "\n")
+  local bparts = {}
+  for i = 1, nd do bparts[i] = state.chord_bass_overrides[i] or "" end
+  f:write("chord_bass_overrides=" .. table.concat(bparts, ",") .. "\n")
   f:write("custom_degrees_n=" .. #state.custom_degrees .. "\n")
   f:write("custom_degrees="   .. arr_to_str(state.custom_degrees) .. "\n")
   f:write("bass_pattern_notes=" .. arr_to_str(state.bass_pattern_notes) .. "\n")
@@ -2712,6 +2829,16 @@ local function load_settings_from_file()
     for tok in (val..","):gmatch("([^,]*),") do
       i = i + 1
       state.chord_quality_overrides[i] = (tok ~= "") and tok or nil
+      if i >= nd then break end
+    end
+  end
+  val = data["chord_bass_overrides"]
+  if val and val ~= "" then
+    state.chord_bass_overrides = {}
+    local i = 0
+    for tok in (val..","):gmatch("([^,]*),") do
+      i = i + 1
+      state.chord_bass_overrides[i] = (tok ~= "") and tok or nil
       if i >= nd then break end
     end
   end
@@ -2790,7 +2917,7 @@ local function write_all()
       local cyc_off = cyc * cycle_beats
       local pos = 0
       for _, ch in ipairs(progression) do
-        for _, note in ipairs(ch.notes) do
+        for _, note in ipairs(ch.voicing) do
           events[#events+1] = {
             pitch=note, pos=cyc_off+pos, dur=ch.duration-(1/ppq),
             vel=state.chord_velocity, channel=state.chord_channel,
@@ -3101,6 +3228,7 @@ local function draw_ui()
     local n = (p.name=="Custom") and #state.custom_degrees or #p.degrees
     init_chord_arrays(n)
     load_preset_qualities(p, n)
+    load_preset_inversions(p, n)
     reset_live()
   end
 
@@ -3126,9 +3254,18 @@ local function draw_ui()
   local mode      = MODE_NAMES[state.mode_idx]
   local qualities = MODE_CHORDS[mode]
 
+  -- Smart voicing: auto-pick rotations that minimise bass leap.
+  local svc, svv = reaper.ImGui_Checkbox(ctx, "Smart voicing (auto-invert)##smartv", state.smart_voicing)
+  if svc then state.smart_voicing = svv; reset_live() end
+  if state.smart_voicing then
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_TextDisabled(ctx,
+      "— rotation auto-picked for slots with no manual inv / no slash")
+  end
+
   -- Column header
   reaper.ImGui_TextDisabled(ctx,
-    string.format("%-18s %-8s %-6s %-10s %-6s", "Chord", "Quality", "Bars", "Inversion", ""))
+    string.format("%-18s %-8s %-6s %-10s %-6s", "Chord", "Quality", "Bars", "Inv", "/Bass"))
   reaper.ImGui_Separator(ctx)
 
   for i, deg in ipairs(degrees) do
@@ -3171,6 +3308,22 @@ local function draw_ui()
     local max_inv = math.min(3, #(CHORD_INTERVALS[quality] or {0})-1)
     local ci2, iv = sslider("inv##inv"..i, state.chord_inversions[i] or 0, 0, max_inv, 65)
     if ci2 then state.chord_inversions[i]=iv; reset_live() end
+
+    -- Slash-bass text input (scale-degree of key, with optional accidental)
+    reaper.ImGui_SameLine(ctx); reaper.ImGui_TextDisabled(ctx, "/")
+    reaper.ImGui_SameLine(ctx)
+    reaper.ImGui_SetNextItemWidth(ctx, 40)
+    local cur_bass = state.chord_bass_overrides[i] or ""
+    local sbc, sbv = reaper.ImGui_InputText(ctx, "##sb"..i, cur_bass)
+    if sbc then
+      sbv = sbv:match("^%s*(.-)%s*$") or ""
+      if sbv == "" then
+        state.chord_bass_overrides[i] = nil
+      elseif sbv:match("^[b#]?[1-7]$") then
+        state.chord_bass_overrides[i] = sbv
+      end
+      reset_live()
+    end
 
     -- Override indicator
     if override then
