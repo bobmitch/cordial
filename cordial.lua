@@ -407,7 +407,8 @@ local state = {
   arp_channel      = 1,
   arp_rate_idx     = 3,
   arp_pattern_idx  = 1,
-  arp_octaves      = 2,
+  arp_oct_low      = 3,
+  arp_oct_high     = 4,
   arp_gate         = 80,
   arp_velocity     = 90,
   arp_vel_human    = 15,
@@ -573,7 +574,7 @@ local PERSIST_KEYS = {
   "chord_track_name", "chord_channel", "chord_enabled", "chord_velocity",
   -- Arp layer
   "arp_enabled", "arp_track_name", "arp_channel", "arp_rate_idx",
-  "arp_pattern_idx", "arp_octaves", "arp_gate", "arp_velocity",
+  "arp_pattern_idx", "arp_oct_low", "arp_oct_high", "arp_gate", "arp_velocity",
   "arp_vel_human", "arp_note_prob", "arp_beat1_prob", "arp_beatn_prob",
   "arp_beatn_idx", "arp_rigidity",
   -- Melody layer
@@ -680,6 +681,17 @@ local function load_proj_state()
     end
   end
   if needs_mel_migration then migrate_mel_preset_idx() end
+
+  -- Migrate legacy arp_octaves (relative span) -> arp_oct_low/high (absolute).
+  local _, ao_low_val = reaper.GetProjExtState(0, EXT_NS, "arp_oct_low")
+  if ao_low_val == "" then
+    local _, ao_legacy = reaper.GetProjExtState(0, EXT_NS, "arp_octaves")
+    local n = tonumber(ao_legacy)
+    if n and n >= 1 then
+      state.arp_oct_low  = 3
+      state.arp_oct_high = math.min(8, 3 + n - 1)
+    end
+  end
 
   -- Arrays
   ok, val = reaper.GetProjExtState(0, EXT_NS, "num_chords")
@@ -2139,19 +2151,17 @@ local function scale_pitch_classes()
   return pcs
 end
 
-local function build_arp_pool(chord_notes, octaves, rigidity_pct)
+local function build_arp_pool(chord_notes, oct_low, oct_high, rigidity_pct)
   if #chord_notes == 0 then return {} end
   local scale_pcs = scale_pitch_classes()
   local chord_set = {}
   for _, n in ipairs(chord_notes) do chord_set[n % 12] = true end
-  local bass_note  = chord_notes[1]
-  local anchor_oct = math.floor(bass_note / 12) - 1
   local scale_prob = rigidity_pct / 100.0
   local pool_set   = {}
-  for oct = 0, octaves - 1 do
+  for oct = oct_low, oct_high do
     for pc = 0, 11 do
-      local pitch = (anchor_oct + oct + 1) * 12 + pc
-      if pitch >= bass_note and pitch >= 0 then
+      local pitch = oct * 12 + pc
+      if pitch >= 0 and pitch <= 127 then
         if chord_set[pc] then
           pool_set[pitch] = true
         elseif scale_pcs[pc] and scale_prob > 0 then
@@ -2239,7 +2249,7 @@ local function build_arp_events(chord_notes, chord_dur_beats, chord_abs_beat)
   local gate_frac  = state.arp_gate / 100.0
   local base_vel   = state.arp_velocity
   local human      = state.arp_vel_human
-  local pool = build_arp_pool(chord_notes, state.arp_octaves, state.arp_rigidity)
+  local pool = build_arp_pool(chord_notes, state.arp_oct_low, state.arp_oct_high, state.arp_rigidity)
   if #pool == 0 then return {} end
   local n_steps = math.ceil(chord_dur_beats / rate_beats)
   local rng_seq = {}
@@ -2249,9 +2259,15 @@ local function build_arp_events(chord_notes, chord_dur_beats, chord_abs_beat)
   local events = {}
   if pattern == "Chord" then
     local chord_voiced = {}
-    for oct = 0, state.arp_octaves - 1 do
-      for _, p in ipairs(chord_notes) do chord_voiced[#chord_voiced+1] = p + oct * 12 end
+    local pcs = {}
+    for _, p in ipairs(chord_notes) do pcs[#pcs+1] = p % 12 end
+    for oct = state.arp_oct_low, state.arp_oct_high do
+      for _, pc in ipairs(pcs) do
+        local pitch = oct * 12 + pc
+        if pitch >= 0 and pitch <= 127 then chord_voiced[#chord_voiced+1] = pitch end
+      end
     end
+    table.sort(chord_voiced)
     local pos      = 0
     local step_idx = #chord_voiced + 1
     while #rng_seq < step_idx + n_steps * 2 do rng_seq[#rng_seq+1] = rng_float() end
@@ -2833,6 +2849,14 @@ local function load_settings_from_file()
     end
   end
   if needs_mel_migration then migrate_mel_preset_idx() end
+  -- Migrate legacy arp_octaves -> arp_oct_low/high for file-based loads.
+  if (data["arp_oct_low"] == nil or data["arp_oct_low"] == "") then
+    local n = tonumber(data["arp_octaves"])
+    if n and n >= 1 then
+      state.arp_oct_low  = 3
+      state.arp_oct_high = math.min(8, 3 + n - 1)
+    end
+  end
   local nd = tonumber(data["num_chords"]) or #state.chord_durations
   local val = data["chord_durations"]
   if val and val ~= "" then state.chord_durations = str_to_num_arr(val, nd) end
@@ -3410,8 +3434,17 @@ local function draw_ui()
   local arc, arv = combo("Rate##arate", ARP_RATE_NAMES, state.arp_rate_idx)
   if arc then state.arp_rate_idx = arv; state.arp_live_events = nil end
   reaper.ImGui_SameLine(ctx)
-  local aocc, aocv = sslider("Octaves##aoct", state.arp_octaves, 1, 4, 75)
-  if aocc then state.arp_octaves = aocv; state.arp_live_events = nil end
+  local alc, alv = sslider("Oct Lo##aoctlo", state.arp_oct_low, 0, 8, 80)
+  if alc then
+    state.arp_oct_low = math.min(alv, state.arp_oct_high)
+    state.arp_live_events = nil
+  end
+  reaper.ImGui_SameLine(ctx)
+  local ahcc, ahv2 = sslider("Oct Hi##aocthi", state.arp_oct_high, 0, 8, 80)
+  if ahcc then
+    state.arp_oct_high = math.max(ahv2, state.arp_oct_low)
+    state.arp_live_events = nil
+  end
 
   local agc, agv = sslider("Gate%%##gate", state.arp_gate, 5, 100, 75)
   if agc then state.arp_gate = agv; state.arp_live_events = nil end
