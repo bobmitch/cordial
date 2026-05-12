@@ -1043,29 +1043,116 @@ local function leading_tone_to(target_pitch) return target_pitch - 1 end
 --
 --  Long-term goal: shape pitch and chord-tone bias across N bars so the
 --  melody arcs (low tension at the start, peak in the middle, resolve
---  at the end). This is intentionally minimal for now — it stores the
---  arc on the generation context and exposes a single tension(0..1)
---  value at any absolute beat. Generators consult it as a soft bias on
---  chord-tone vs scale-tone selection. Rhythm is *not* affected (the
---  DAW owns groove); this is purely about pitch colour over time.
+--  at the end). It stores the arc on the generation context and exposes
+--  a tension(0..1) value at any absolute beat. Generators consult it as
+--  a soft bias on chord-tone vs scale-tone selection. Rhythm is *not*
+--  affected directly (the DAW owns groove); density is shaped through
+--  the same arc so onset clustering follows the tension curve.
 --
---  Future work:
---    - per-progression peak placement (e.g. golden-section)
---    - multi-arc nesting (4-bar antecedent, 4-bar consequent, …)
---    - cadence-aware drop at progression end
+--  The arc operates at two nested levels:
+--    - Cycle-level arch (one peak per progression pass) shapes long form.
+--    - Per-phrase sub-arches (~4-bar units) ride on top, blended with a
+--      modest weight so each phrase feels like a gesture without
+--      drowning out the long-form shape.
+--
+--  Peak placement and post-peak slope adapt to the progression:
+--    - Short progressions use a symmetric peak.
+--    - Longer non-cadential progressions use a golden-section peak.
+--    - Progressions that end on the tonic (the catalogue's cadential
+--      ones) pull the peak slightly earlier, steepen the descent, and
+--      floor tension during the resolution chord.
 -- ----------------------------------------------------------------
 
-local function phrase_arc_init(context, total_beats, cycle_offset)
+-- Locate the phrase containing within-cycle beat `rel`. Returns the
+-- phrase table or nil if no phrases. Past-end falls back to the last
+-- phrase so the final onset still has a valid sub-arc anchor.
+local function phrase_at(phrases, rel)
+  if not phrases or #phrases == 0 then return nil end
+  for _, ph in ipairs(phrases) do
+    if rel >= ph.abs_start and rel < ph.abs_end then return ph end
+  end
+  return phrases[#phrases]
+end
+
+local function phrase_arc_init(context, total_beats, cycle_offset,
+                               progression, phrases)
   -- Re-initialised each cycle so the arc shape repeats per progression
   -- pass; cycle_offset rebases tension calc onto the current cycle.
+  --
+  -- Cadence detection: the catalogue's cadential presets (perfect,
+  -- minor, Phrygian-dom, Andalusian, extended, …) all resolve to the
+  -- tonic. `last.degree == 1` is the structural-resolution signal; a V
+  -- or IV penultimate further marks a "strong" cadence (V→I, V7→I,
+  -- IV→I) that warrants an even steeper descent.
+  local n_chords      = progression and #progression or 0
+  local last          = progression and progression[n_chords] or nil
+  local penult        = (n_chords > 1) and progression[n_chords - 1] or nil
+  local cadence_drop  = (last and last.degree == 1) and true or false
+  local strong_cadence = cadence_drop and penult
+                         and (penult.degree == 5 or penult.degree == 4)
+                         and true or false
+
+  -- Peak placement. STARTING POINTS — tune by ear:
+  --   short_peak    = 0.50   (≤2 chord progressions, stays symmetric)
+  --   golden_peak   = 0.618  (golden section, default for longer)
+  --   cadence_peak  = 0.55   (pulled earlier to give the descent room)
+  local peak_frac
+  if n_chords <= 2 then
+    peak_frac = 0.50
+  elseif cadence_drop then
+    peak_frac = 0.55
+  else
+    peak_frac = 0.618
+  end
+
+  -- Within-cycle beat where the final chord block starts; the cadence
+  -- floor in phrase_arc_tension clamps tension below this point.
+  local final_block_start_rel = total_beats or 0
+  if last and last.duration then
+    final_block_start_rel = math.max(0, (total_beats or 0) - last.duration)
+  end
+
   context.phrase_arc = {
-    total_beats  = math.max(1, total_beats or 1),
-    cycle_offset = cycle_offset or 0,
-    peak_frac    = 0.6,
-    peak_value   = 0.85,           -- max tension
-    base_value   = 0.10,           -- tension at start/end
-    shape        = "arch",
+    total_beats           = math.max(1, total_beats or 1),
+    cycle_offset          = cycle_offset or 0,
+    peak_frac             = peak_frac,
+    peak_value            = 0.85,   -- max tension
+    base_value            = 0.10,   -- tension at start/end
+    shape                 = "arch",
+    cadence_drop          = cadence_drop,
+    strong_cadence        = strong_cadence,
+    final_block_start_rel = final_block_start_rel,
+    phrases               = phrases,
   }
+end
+
+-- Cycle-level arch height (0..1) at relative position rel (in beats
+-- from cycle start). Asymmetric peak at pa.peak_frac. Shared by
+-- tension and density so they trace the same long-form shape.
+local function phrase_arc_cycle_v(pa, rel)
+  local t = math.max(0, math.min(1, rel / pa.total_beats))
+  if pa.shape ~= "arch" then return 0.5, t end
+  local v
+  if t < pa.peak_frac then
+    v = t / math.max(0.01, pa.peak_frac)
+  else
+    v = 1.0 - (t - pa.peak_frac) / math.max(0.01, 1.0 - pa.peak_frac)
+  end
+  return v, t
+end
+
+-- Per-phrase sub-arch height (0..1). Symmetric peak at the phrase
+-- midpoint; phrase contours already shape pitch height so the sub-arc
+-- only drives tension/density. Returns nil when there's a single phrase
+-- (the cycle arc already covers it and a redundant sub-arc just
+-- amplifies the same shape).
+local function phrase_arc_phrase_v(pa, rel)
+  if not pa.phrases or #pa.phrases <= 1 then return nil end
+  local ph = phrase_at(pa.phrases, rel)
+  if not ph then return nil end
+  local pdur = math.max(0.001, ph.abs_end - ph.abs_start)
+  local pt   = math.max(0, math.min(1, (rel - ph.abs_start) / pdur))
+  return math.sin(pt * math.pi)
 end
 
 -- Returns 0..1 tension at the given absolute beat. 0 = full repose
@@ -1075,18 +1162,40 @@ local function phrase_arc_tension(context, abs_beat)
   local pa = context.phrase_arc
   if not pa then return 0.0 end
   local rel = abs_beat - (pa.cycle_offset or 0)
-  local t = math.max(0, math.min(1, rel / pa.total_beats))
-  local v
-  if pa.shape == "arch" then
-    -- Asymmetric arch with peak at peak_frac.
-    if t < pa.peak_frac then
-      v = t / pa.peak_frac
-    else
-      v = 1.0 - (t - pa.peak_frac) / math.max(0.01, 1.0 - pa.peak_frac)
-    end
-  else
-    v = 0.5
+  local cycle_v, t = phrase_arc_cycle_v(pa, rel)
+
+  -- Cadence-aware steeper descent: raise the post-peak height to a
+  -- power > 1 so the line settles harder into the resolution.
+  -- STARTING POINTS — tune by ear:
+  --   descent_pow        = 1.5  (plagal / borrowed → I)
+  --   strong_descent_pow = 1.8  (V → I, V7 → I, IV → I)
+  if pa.cadence_drop and t > pa.peak_frac then
+    local pow = pa.strong_cadence and 1.8 or 1.5
+    cycle_v = cycle_v ^ pow
   end
+
+  -- Multi-arc nesting: per-phrase sub-arch added on top of the cycle
+  -- arch. Additive (not multiplicative) so the long-form shape still
+  -- dominates — too strong and you get HVAC-style pumping every 4 bars.
+  -- STARTING POINTS — tune by ear:
+  --   cycle_weight  = 0.70
+  --   phrase_weight = 0.30
+  local v = cycle_v
+  local phrase_v = phrase_arc_phrase_v(pa, rel)
+  if phrase_v then
+    v = 0.70 * cycle_v + 0.30 * phrase_v
+  end
+
+  -- Cadence floor: during the resolution chord, clamp tension so the
+  -- chord-tone landing rule dominates the close regardless of where
+  -- the arch happens to sit.
+  -- STARTING POINT — tune by ear:
+  --   cadence_floor = 0.12
+  if pa.cadence_drop and rel >= (pa.final_block_start_rel or pa.total_beats) then
+    v = math.min(v, 0.12)
+  end
+
+  v = math.max(0, math.min(1, v))
   return pa.base_value + (pa.peak_value - pa.base_value) * v
 end
 
@@ -1101,20 +1210,33 @@ end
 local function phrase_arc_density(context, abs_beat)
   local busy = (state.mel_busyness or 50) / 100.0
   local pa = context.phrase_arc
-  local arch = 0.5
+  local arch, rel = 0.5, 0
   if pa then
-    local rel = abs_beat - (pa.cycle_offset or 0)
-    local t = math.max(0, math.min(1, rel / pa.total_beats))
-    if t < pa.peak_frac then
-      arch = t / math.max(0.01, pa.peak_frac)
-    else
-      arch = 1.0 - (t - pa.peak_frac) / math.max(0.01, 1.0 - pa.peak_frac)
+    rel = abs_beat - (pa.cycle_offset or 0)
+    arch = phrase_arc_cycle_v(pa, rel)
+
+    -- Per-phrase sub-arch on density — same weighting as tension so the
+    -- onset clustering tracks the same gesture per phrase.
+    local phrase_v = phrase_arc_phrase_v(pa, rel)
+    if phrase_v then
+      arch = 0.70 * arch + 0.30 * phrase_v
     end
   end
   -- Amplitude grows with busyness so low values stay flat and high
   -- values swing strongly between trough and crest.
   local amplitude = 0.45 * busy
   local v = busy + amplitude * (arch - 0.5)
+
+  -- Cadence-aware sparsity in the resolution chord: thin the surface so
+  -- the landing breathes. Multiplicative so the effect scales with
+  -- busyness — barely registers at low busyness, pulls hard at high.
+  -- STARTING POINT — tune by ear:
+  --   cadence_density_mult = 0.70
+  if pa and pa.cadence_drop
+     and rel >= (pa.final_block_start_rel or pa.total_beats) then
+    v = v * 0.70
+  end
+
   return math.max(0, math.min(1, v))
 end
 
@@ -2082,9 +2204,10 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
 
   -- Phrase-arc tension repeats per cycle: each progression pass arcs from
   -- repose → peak → repose, so cycle 2 isn't stuck at "end of arc" tension.
+  -- Plan phrases first so the arc can nest per-phrase sub-arches inside
+  -- the cycle-level shape (see phrase_arc_init).
   local total_beats = 0
   for _, ch in ipairs(progression) do total_beats = total_beats + ch.duration end
-  phrase_arc_init(context, total_beats, cycle_offset)
 
   -- Plan phrases for this cycle and build a structural skeleton: one
   -- voice-led chord tone per chord block, shaped by the per-phrase
@@ -2092,6 +2215,7 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
   -- the surface walker aims at the *next* skeleton pitch through the
   -- block's interior.
   local phrases  = plan_phrases(progression, state.timesig_num)
+  phrase_arc_init(context, total_beats, cycle_offset, progression, phrases)
   local skeleton = build_skeleton(progression, phrases,
                                   context.last_skeleton_pitch
                                   or context.prev_pitch)
