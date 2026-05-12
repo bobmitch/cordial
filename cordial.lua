@@ -362,6 +362,9 @@ local MEL_DURATIONS = {
 local MEL_DUR_NAMES = {}
 for _, d in ipairs(MEL_DURATIONS) do MEL_DUR_NAMES[#MEL_DUR_NAMES+1] = d.label end
 
+-- Anchor modes for the melody pitch window. Index matches state.mel_anchor_mode.
+local MEL_ANCHOR_NAMES = { "Fixed", "Chord root", "Scale root" }
+
 -- Melody generation presets
 local MEL_PRESETS = {
   "Free",           -- 1: weighted random walk, gap fill, chord-tone bias
@@ -436,8 +439,18 @@ local state = {
   mel_max_dur_idx  = 6,          -- default max = 1/2
   mel_velocity     = 85,
   mel_vel_human    = 20,
-  mel_oct_min      = 4,          -- minimum octave for melody
-  mel_oct_max      = 5,          -- maximum octave for melody
+  -- Melody pitch window. The window is [anchor - mel_range_down,
+  -- anchor + mel_range_up] in semitones; the anchor is selected per
+  -- block by mel_anchor_mode:
+  --   1 = Fixed       (tonic at mel_anchor_oct — register independent of chord)
+  --   2 = Chord root  (ch.root_midi — window travels with the harmony)
+  --   3 = Scale root  (tonic at state.octave — fixed key centre)
+  -- Asymmetric defaults match real lead playing: ride above the chord,
+  -- dip a fifth below.
+  mel_anchor_mode  = 2,
+  mel_anchor_oct   = 4,
+  mel_range_up     = 14,
+  mel_range_down   = 7,
   mel_busyness     = 45,         -- 0=sparse/long-held, 100=dense/clustered bursts
   mel_space        = 0,          -- 0=fill the bar, 100=lots of rests, onsets pinned to quarters
   mel_cadence      = 60,         -- 0=free wander, 100=textbook cadences w/ phrase grammar
@@ -590,7 +603,8 @@ local PERSIST_KEYS = {
   "mel_enabled", "mel_track_name", "mel_channel", "mel_preset_idx",
   "mel_preset_layout_v",
   "mel_min_dur_idx", "mel_max_dur_idx", "mel_velocity", "mel_vel_human",
-  "mel_oct_min", "mel_oct_max", "mel_busyness", "mel_space", "mel_cadence",
+  "mel_anchor_mode", "mel_anchor_oct", "mel_range_up", "mel_range_down",
+  "mel_busyness", "mel_space", "mel_cadence",
   "mel_rhythm_rigidity", "mel_render_cycles",
   -- Bass layer
   "bass_enabled", "bass_track_name", "bass_channel", "bass_style_idx",
@@ -934,35 +948,51 @@ local function build_progression()
   return result
 end
 
--- Return sorted list of scale MIDI pitches across mel_oct_min..mel_oct_max
-local function scale_notes_in_range()
+-- Compute the melody pitch window [lo, hi] (MIDI) for the current
+-- block. The anchor depends on mel_anchor_mode; the span is
+-- mel_range_down semitones below and mel_range_up above. Clamped to
+-- valid MIDI (0..127). chord_root_midi may be nil when not available
+-- (e.g. live preview before a chord has been picked); we fall back to
+-- the scale-root anchor.
+local function mel_window(chord_root_midi)
+  local anchor
+  local mode = state.mel_anchor_mode or 2
+  if mode == 2 and chord_root_midi then
+    anchor = chord_root_midi
+  elseif mode == 3 then
+    anchor = midi_note(state.root_idx, state.octave)
+  else
+    anchor = midi_note(state.root_idx, state.mel_anchor_oct or 4)
+  end
+  local lo = anchor - (state.mel_range_down or 7)
+  local hi = anchor + (state.mel_range_up   or 14)
+  if lo < 0   then lo = 0   end
+  if hi > 127 then hi = 127 end
+  if hi < lo  then hi = lo  end
+  return lo, hi
+end
+
+-- Return sorted, deduped MIDI pitches of the current scale that fall
+-- inside [lo_p, hi_p].
+local function scale_notes_in_range(lo_p, hi_p)
   local mode     = MODE_NAMES[state.mode_idx]
   local ivs      = SCALE_INTERVALS[mode]
   local root_pc  = (state.root_idx - 1) % 12
+  local pcs      = {}
+  for _, iv in ipairs(ivs) do pcs[(root_pc + iv) % 12] = true end
   local notes    = {}
-  for oct = state.mel_oct_min - 1, state.mel_oct_max do
-    for _, iv in ipairs(ivs) do
-      local p = (oct + 1) * 12 + ((root_pc + iv) % 12)
-      if p >= (state.mel_oct_min) * 12 and p <= (state.mel_oct_max + 1) * 12 - 1 then
-        notes[#notes+1] = p
-      end
-    end
+  for p = lo_p, hi_p do
+    if pcs[p % 12] then notes[#notes+1] = p end
   end
-  table.sort(notes)
-  -- Deduplicate
-  local deduped = {}
-  for i, n in ipairs(notes) do
-    if i == 1 or n ~= notes[i-1] then deduped[#deduped+1] = n end
-  end
-  return deduped
+  return notes
 end
 
--- Return chord tone pitches within the melody range
-local function chord_notes_in_range(chord_notes)
+-- Return chord tone pitches within [lo_p, hi_p].
+local function chord_notes_in_range(chord_notes, lo_p, hi_p)
   local pcs = {}
   for _, n in ipairs(chord_notes) do pcs[n % 12] = true end
   local result = {}
-  for p = state.mel_oct_min * 12, (state.mel_oct_max + 1) * 12 - 1 do
+  for p = lo_p, hi_p do
     if pcs[p % 12] then result[#result+1] = p end
   end
   return result
@@ -1054,28 +1084,15 @@ local function chord_scale_pc_set(chord_notes, chord_root_midi)
   return merged, differs
 end
 
--- Sorted, deduped MIDI pitches across mel_oct_min..mel_oct_max for a
--- given pitch-class set. Mirrors scale_notes_in_range but works on any
--- pc set (e.g., a chord-aware one).
-local function pcs_to_notes_in_range(pcs)
+-- Sorted MIDI pitches inside [lo_p, hi_p] for a given pitch-class set.
+-- Mirrors scale_notes_in_range but works on any pc set (e.g., a
+-- chord-aware one).
+local function pcs_to_notes_in_range(pcs, lo_p, hi_p)
   local notes = {}
-  for oct = state.mel_oct_min - 1, state.mel_oct_max do
-    for pc = 0, 11 do
-      if pcs[pc] then
-        local p = (oct + 1) * 12 + pc
-        if p >= state.mel_oct_min * 12
-           and p <= (state.mel_oct_max + 1) * 12 - 1 then
-          notes[#notes+1] = p
-        end
-      end
-    end
+  for p = lo_p, hi_p do
+    if pcs[p % 12] then notes[#notes+1] = p end
   end
-  table.sort(notes)
-  local out = {}
-  for i, n in ipairs(notes) do
-    if i == 1 or n ~= notes[i-1] then out[#out+1] = n end
-  end
-  return out
+  return notes
 end
 
 -- Snap a pitch to the nearest chord tone within a sorted chord_range.
@@ -1694,7 +1711,8 @@ local function build_skeleton(progression, phrases, prev_skeleton_pitch)
     for offs = 0, n_blocks - 1 do
       local bi          = ph.start_block + offs
       local ch          = progression[bi]
-      local chord_range = chord_notes_in_range(ch.notes)
+      local lo_p, hi_p  = mel_window(ch.root_midi)
+      local chord_range = chord_notes_in_range(ch.notes, lo_p, hi_p)
       if #chord_range == 0 then
         skeleton[bi] = prev or 60
       else
@@ -2088,8 +2106,9 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
           pitch = nearest_chord_tone(pitch, chord_range)
         end
 
-        pitch = math.max(state.mel_oct_min * 12,
-                math.min((state.mel_oct_max + 1) * 12 - 1, pitch))
+        local clamp_lo = context.mel_lo_p or 0
+        local clamp_hi = context.mel_hi_p or 127
+        pitch = math.max(clamp_lo, math.min(clamp_hi, pitch))
 
         -- Colour tone (passing/neighbour/leading-tone). Only when there's
         -- room and we're not at the very first onset (would obscure the
@@ -2365,15 +2384,17 @@ local function mel_strat_pedal_point(block_dur, chord_notes, scale_notes, chord_
   -- chord's voicing on the FIRST block (so the pedal sits "inside the
   -- chord"). After that first selection, freeze it for the whole render
   -- so the pedal doesn't bounce octaves block-by-block.
+  local lo_p = ctx_tbl.mel_lo_p or 0
+  local hi_p = ctx_tbl.mel_hi_p or 127
   if not ctx_tbl.pedal_pitch then
     local target
     if #chord_range > 0 then
       target = (chord_range[1] + chord_range[#chord_range]) / 2
     else
-      target = (state.mel_oct_min + state.mel_oct_max + 1) * 6
+      target = (lo_p + hi_p) / 2
     end
     local best, best_d = nil, math.huge
-    for p = state.mel_oct_min * 12, (state.mel_oct_max + 1) * 12 - 1 do
+    for p = lo_p, hi_p do
       if p % 12 == pedal_pc then
         local d = math.abs(p - target)
         if d < best_d then best, best_d = p, d end
@@ -2397,8 +2418,6 @@ local function mel_strat_pedal_point(block_dur, chord_notes, scale_notes, chord_
   ctx_tbl.block_skeleton = pedal
 
   local busy = (state.mel_busyness or 50) / 100.0
-  local lo_p = state.mel_oct_min * 12
-  local hi_p = (state.mel_oct_max + 1) * 12 - 1
 
   -- Build a weighted off-pedal candidate set around the pedal. Window
   -- is a perfect fifth either side (pedal octave variation is handled
@@ -2653,8 +2672,9 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
     -- 3rd or 7th right when the chord wants the altered one.
     local chord_scale_pcs, chord_is_altered =
         chord_scale_pc_set(ch.notes, ch.root_midi)
-    local scale_notes  = pcs_to_notes_in_range(chord_scale_pcs)
-    local chord_range  = chord_notes_in_range(ch.notes)
+    local lo_p, hi_p   = mel_window(ch.root_midi)
+    local scale_notes  = pcs_to_notes_in_range(chord_scale_pcs, lo_p, hi_p)
+    local chord_range  = chord_notes_in_range(ch.notes, lo_p, hi_p)
     if #scale_notes == 0 then
       abs_pos = abs_pos + ch.duration
     else
@@ -2665,6 +2685,8 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
       context.is_first_block   = (cycle_offset == 0 and ci == 1)
       context.block_idx        = ci
       context.block_skeleton   = skeleton[ci]
+      context.mel_lo_p         = lo_p
+      context.mel_hi_p         = hi_p
       -- next_skeleton: target the surface walker aims at through this
       -- block. At progression end we resolve to the current skeleton
       -- (a settled close) — cycle wrap will pick up fresh next time.
@@ -4108,20 +4130,28 @@ local function draw_ui()
   reaper.ImGui_TextDisabled(ctx, "note duration range  ("
     ..MEL_DUR_NAMES[state.mel_min_dur_idx].." – "..MEL_DUR_NAMES[state.mel_max_dur_idx]..")")
 
-  -- Octave range
-  local mominc, ominv = sslider("Oct Min##momin", state.mel_oct_min, 2, 7, 80)
-  if mominc then
-    state.mel_oct_min = math.min(ominv, state.mel_oct_max)
-    state.mel_live_events = nil
+  -- Pitch window: anchor + asymmetric range.
+  reaper.ImGui_SetNextItemWidth(ctx, 110)
+  local manc, manv = combo("Anchor##manchor", MEL_ANCHOR_NAMES, state.mel_anchor_mode)
+  if manc then state.mel_anchor_mode = manv; state.mel_live_events = nil end
+  if state.mel_anchor_mode == 1 then
+    reaper.ImGui_SameLine(ctx)
+    local maoc, maov = sslider("Oct##manoct", state.mel_anchor_oct, 2, 7, 60)
+    if maoc then state.mel_anchor_oct = maov; state.mel_live_events = nil end
   end
   reaper.ImGui_SameLine(ctx)
-  local momaxc, omaxv = sslider("Oct Max##momax", state.mel_oct_max, 2, 7, 80)
-  if momaxc then
-    state.mel_oct_max = math.max(omaxv, state.mel_oct_min)
-    state.mel_live_events = nil
-  end
+  reaper.ImGui_TextDisabled(ctx,
+    state.mel_anchor_mode == 1 and "fixed register" or
+    state.mel_anchor_mode == 2 and "centred on each chord's root" or
+    "centred on the key's tonic")
+
+  local mrdc, mrdv = sslider("Down##mrdown", state.mel_range_down, 0, 36, 90)
+  if mrdc then state.mel_range_down = mrdv; state.mel_live_events = nil end
   reaper.ImGui_SameLine(ctx)
-  reaper.ImGui_TextDisabled(ctx, "octave range")
+  local mruc, mruv = sslider("Up##mrup",   state.mel_range_up,   0, 36, 90)
+  if mruc then state.mel_range_up = mruv; state.mel_live_events = nil end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextDisabled(ctx, "semitones below / above anchor")
 
   -- Cadence: single musical knob that drives chord-tone landings,
   -- strong-beat preference, leading-tone approaches and phrase-end
