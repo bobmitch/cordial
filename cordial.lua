@@ -2342,13 +2342,15 @@ end
 
 -- ── 4. PEDAL POINT ─────────────────────────────────────────────
 -- Locks onto the mode's tonic, placed inside the chord range. Off-pedal
--- onsets are diatonic neighbours of the pedal when the current chord
--- harmonises the pedal (consonant block), and resolutions to a chord
--- tone close to the pedal when it doesn't (dissonant block). Busyness
--- drives the rate of departure; space drives rests (via the shared rest
--- gate, which busyness already feeds). Block-start is the pedal itself
--- — we explicitly opt out of the shared skeleton snap. Colour tones are
--- off so the texture stays austere.
+-- onsets draw from a weighted palette around the pedal: diatonic
+-- neighbours (heavy weight) plus nearby chord tones within a perfect
+-- fifth (lighter weight, boosted on strong beats and on dissonant
+-- blocks where the line wants to resolve). Busyness drives the rate of
+-- departure; space drives rests (via the shared rest gate). Block-start
+-- is the pedal itself — we explicitly opt out of the shared skeleton
+-- snap. Colour tones are off so the texture stays austere. The pedal
+-- itself can lift an octave on weak beats with low probability, so the
+-- anchor breathes without losing its identity.
 local function mel_strat_pedal_point(block_dur, chord_notes, scale_notes, chord_range, ctx_tbl)
   ctx_tbl.snap_block_start       = 0     -- pedal IS the block start
   ctx_tbl.chord_landing_strength = 0.2   -- let the pedal clash if it must
@@ -2382,7 +2384,7 @@ local function mel_strat_pedal_point(block_dur, chord_notes, scale_notes, chord_
   local pedal = ctx_tbl.pedal_pitch
 
   -- Is the pedal a chord tone of the current block? Drives off-pedal
-  -- behaviour (neighbour vs. resolution).
+  -- behaviour (neighbour-decoration vs. resolution-toward-chord-tone).
   local pedal_in_chord = false
   for _, n in ipairs(chord_notes) do
     if n % 12 == pedal_pc then pedal_in_chord = true; break end
@@ -2395,9 +2397,56 @@ local function mel_strat_pedal_point(block_dur, chord_notes, scale_notes, chord_
   ctx_tbl.block_skeleton = pedal
 
   local busy = (state.mel_busyness or 50) / 100.0
+  local lo_p = state.mel_oct_min * 12
+  local hi_p = (state.mel_oct_max + 1) * 12 - 1
+
+  -- Build a weighted off-pedal candidate set around the pedal. Window
+  -- is a perfect fifth either side (pedal octave variation is handled
+  -- separately by the weak-beat octave lift below, so we don't need to
+  -- reach an octave inside the off-pedal palette).
+  local function build_candidates(sn, cr, strong)
+    local cands = {}
+    local up = diatonic_step(sn, pedal,  1)
+    local dn = diatonic_step(sn, pedal, -1)
+    local neigh_w = strong and 2.0 or 3.0   -- stepwise stays the home base
+    if up and up ~= pedal then cands[#cands+1] = {p=up, w=neigh_w} end
+    if dn and dn ~= pedal then cands[#cands+1] = {p=dn, w=neigh_w} end
+    if cr and #cr > 0 then
+      -- Chord-tone weight: low on consonant blocks (the line is mostly
+      -- decoration), high on dissonant blocks (the line is resolving).
+      -- Busyness lifts both — more activity, more decoration.
+      local ct_base = pedal_in_chord and (0.4 + 0.9 * busy)
+                                     or  (1.6 + 0.6 * busy)
+      for _, n in ipairs(cr) do
+        local d = math.abs(n - pedal)
+        if d > 0 and d <= 7 then
+          local w = ct_base * (1.0 - (d - 1) / 9.0)   -- closer = heavier
+          if d <= 2 then w = w * 1.4 end              -- stepwise bonus
+          if strong then w = w * 1.3 end              -- strong beats prefer chord tones
+          if w > 0 then cands[#cands+1] = {p=n, w=w} end
+        end
+      end
+    end
+    return cands
+  end
+
+  local function weighted_pick(cands)
+    if #cands == 0 then return nil end
+    local total = 0
+    for _, c in ipairs(cands) do total = total + c.w end
+    if total <= 0 then return cands[rng_int(1, #cands)].p end
+    local r = rng_float() * total
+    for _, c in ipairs(cands) do
+      r = r - c.w
+      if r <= 0 then return c.p end
+    end
+    return cands[#cands].p
+  end
 
   local function pitch_fn(pos, bdur, cn, sn, prev, c)
     if c.is_block_start_slot then return pedal end
+
+    local mw = c.metric_weight_here or 0
 
     -- Probability of departing from the pedal on this onset. On
     -- consonant blocks the pedal sustains more freely; on dissonant
@@ -2405,28 +2454,34 @@ local function mel_strat_pedal_point(block_dur, chord_notes, scale_notes, chord_
     local depart_p = pedal_in_chord and (0.15 + 0.55 * busy)
                                     or  (0.45 + 0.50 * busy)
     -- Strong beats favour the pedal (gravitational centre).
-    if (c.metric_weight_here or 0) >= 0.95 then
-      depart_p = depart_p * 0.5
-    end
+    if mw >= 0.95 then depart_p = depart_p * 0.5 end
 
     if rng_float() > depart_p then
-      return pedal   -- return to / hold the pedal
+      -- Hold / return to the pedal — but on a weak beat, occasionally
+      -- lift it an octave so the anchor breathes across registers
+      -- without losing its identity.
+      local p = pedal
+      if mw < 0.6 and rng_float() < 0.08 then
+        local cand = p + ((rng_float() < 0.5) and 12 or -12)
+        if cand >= lo_p and cand <= hi_p then p = cand end
+      end
+      return p
     end
 
-    -- Departure shape.
+    local strong = mw >= 0.75
+    local cands  = build_candidates(sn, c.chord_range, strong)
+    local pick   = weighted_pick(cands)
+    if pick then return pick end
+
+    -- Fallbacks mirror the original behaviour when the palette is empty.
     if pedal_in_chord then
-      -- Consonant: oscillate to a diatonic neighbour, alternate sides.
       local dir = (rng_float() < 0.5) and 1 or -1
       return diatonic_step(sn, pedal, dir)
+    elseif c.chord_range and #c.chord_range > 0 then
+      return nearest_chord_tone(pedal, c.chord_range)
     else
-      -- Dissonant: resolve to a chord tone close to the pedal — the
-      -- "way home" that makes the dissonance feel intentional.
-      if c.chord_range and #c.chord_range > 0 then
-        return nearest_chord_tone(pedal, c.chord_range)
-      else
-        local dir = (rng_float() < 0.5) and 1 or -1
-        return diatonic_step(sn, pedal, dir)
-      end
+      local dir = (rng_float() < 0.5) and 1 or -1
+      return diatonic_step(sn, pedal, dir)
     end
   end
 
