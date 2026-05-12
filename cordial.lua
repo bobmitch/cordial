@@ -1013,6 +1013,71 @@ end
 local function is_chord_tone(pitch, chord_pcs) return chord_pcs[pitch % 12] == true end
 local function is_scale_tone(pitch, scale_pcs) return scale_pcs[pitch % 12] == true end
 
+-- Chord-aware scale pitch-class set: the line-walking and colour-tone
+-- pool that's correct for THIS chord, not just the global key. We start
+-- from the global mode and merge in the chord's pitch-classes, then —
+-- crucially — let the chord's 3rd and 7th override any conflicting
+-- scale tone in the same slot. So on a `V7/vi` (E7 in C major) the
+-- diatonic G is dropped in favour of the chord's G#; on `Imaj7` in
+-- C lydian-dominant the scale's b7 (Bb) is dropped in favour of the
+-- chord's maj7 (B). Other characteristic colour tones in the global
+-- mode (#11, b9, etc.) are preserved. Returns the pc set plus a
+-- `differs_from_global` flag (true when at least one scale tone was
+-- swapped out or one chord tone added that wasn't in the global mode).
+local function chord_scale_pc_set(chord_notes, chord_root_midi)
+  local global_pcs = scale_pc_set()
+  local chord_pcs  = chord_pc_set(chord_notes)
+  local merged     = {}
+  for pc in pairs(global_pcs) do merged[pc] = true end
+  local differs = false
+  if chord_root_midi then
+    local r = chord_root_midi % 12
+    local has_min3 = chord_pcs[(r + 3)  % 12] == true
+    local has_maj3 = chord_pcs[(r + 4)  % 12] == true
+    local has_b7   = chord_pcs[(r + 10) % 12] == true
+    local has_maj7 = chord_pcs[(r + 11) % 12] == true
+    local function drop(pc)
+      if merged[pc] and not chord_pcs[pc] then
+        merged[pc] = nil
+        differs = true
+      end
+    end
+    if has_maj3 and not has_min3 then drop((r + 3)  % 12) end
+    if has_min3 and not has_maj3 then drop((r + 4)  % 12) end
+    if has_b7   and not has_maj7 then drop((r + 11) % 12) end
+    if has_maj7 and not has_b7   then drop((r + 10) % 12) end
+  end
+  for pc in pairs(chord_pcs) do
+    if not merged[pc] then differs = true end
+    merged[pc] = true
+  end
+  return merged, differs
+end
+
+-- Sorted, deduped MIDI pitches across mel_oct_min..mel_oct_max for a
+-- given pitch-class set. Mirrors scale_notes_in_range but works on any
+-- pc set (e.g., a chord-aware one).
+local function pcs_to_notes_in_range(pcs)
+  local notes = {}
+  for oct = state.mel_oct_min - 1, state.mel_oct_max do
+    for pc = 0, 11 do
+      if pcs[pc] then
+        local p = (oct + 1) * 12 + pc
+        if p >= state.mel_oct_min * 12
+           and p <= (state.mel_oct_max + 1) * 12 - 1 then
+          notes[#notes+1] = p
+        end
+      end
+    end
+  end
+  table.sort(notes)
+  local out = {}
+  for i, n in ipairs(notes) do
+    if i == 1 or n ~= notes[i-1] then out[#out+1] = n end
+  end
+  return out
+end
+
 -- Snap a pitch to the nearest chord tone within a sorted chord_range.
 local function nearest_chord_tone(pitch, chord_range)
   if #chord_range == 0 then return pitch end
@@ -1884,8 +1949,12 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
   local min_slots      = 1  -- 1 grid step = min duration by definition
   local max_slots      = math.floor(mel_max_beats() / grid + 0.5)
 
-  -- Cache PC sets for the duration of this block
-  local scale_pcs = scale_pc_set()
+  -- Cache PC sets for the duration of this block. The melody cycle
+  -- passes in a chord-aware scale pc set via context.scale_pcs_chord
+  -- (chord tones merged with the global mode, 3rd/7th conflicts
+  -- resolved in favour of the chord). Fall back to the raw global
+  -- mode if no caller has provided one (e.g., future direct callers).
+  local scale_pcs = context.scale_pcs_chord or scale_pc_set()
   local chord_pcs = chord_pc_set(chord_notes)
   context.scale_pcs   = scale_pcs
   context.chord_pcs   = chord_pcs
@@ -2003,8 +2072,16 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
         -- Chord-tone landing enforcement on strong beats inside the block:
         -- with probability landing_p (cadence-driven), snap a non-chord
         -- result to the nearest chord tone. Strategies can reduce the
-        -- pull via context.chord_landing_strength (0..1).
+        -- pull via context.chord_landing_strength (0..1). Altered chords
+        -- (secondary dominants, modal-mixture, anything whose pcs differ
+        -- from the global key) get a stronger pull: the chord-aware scale
+        -- already steers the walker, but on jazz/fusion changes a firmer
+        -- landing on strong beats is the difference between "knows the
+        -- changes" and "fights the changes".
         local landing_scale = context.chord_landing_strength or 1.0
+        if context.chord_is_altered then
+          landing_scale = math.min(1.0, landing_scale * 1.4)
+        end
         if not first_onset and landing_p > 0 and landing_scale > 0
            and not is_chord_tone(pitch, chord_pcs)
            and rng_float() < landing_p * landing_scale then
@@ -2515,16 +2592,24 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
   for _, ph in ipairs(phrases) do phrase_end_block[ph.end_block] = true end
 
   for ci, ch in ipairs(progression) do
-    local scale_notes  = scale_notes_in_range()
+    -- Chord-aware scale: walk the line on a pc set that resolves the
+    -- chord's 3rd/7th against the global mode. Without this, borrowed
+    -- chords and secondary dominants leave the line walking the diatonic
+    -- 3rd or 7th right when the chord wants the altered one.
+    local chord_scale_pcs, chord_is_altered =
+        chord_scale_pc_set(ch.notes, ch.root_midi)
+    local scale_notes  = pcs_to_notes_in_range(chord_scale_pcs)
     local chord_range  = chord_notes_in_range(ch.notes)
     if #scale_notes == 0 then
       abs_pos = abs_pos + ch.duration
     else
-      context.abs_block_start = abs_pos
-      context.chord_meta      = ch
-      context.is_first_block  = (cycle_offset == 0 and ci == 1)
-      context.block_idx       = ci
-      context.block_skeleton  = skeleton[ci]
+      context.abs_block_start  = abs_pos
+      context.chord_meta       = ch
+      context.scale_pcs_chord  = chord_scale_pcs
+      context.chord_is_altered = chord_is_altered
+      context.is_first_block   = (cycle_offset == 0 and ci == 1)
+      context.block_idx        = ci
+      context.block_skeleton   = skeleton[ci]
       -- next_skeleton: target the surface walker aims at through this
       -- block. At progression end we resolve to the current skeleton
       -- (a settled close) — cycle wrap will pick up fresh next time.
@@ -2572,9 +2657,14 @@ local function scale_pitch_classes()
   return pcs
 end
 
-local function build_arp_pool(chord_notes, oct_low, oct_high, rigidity_pct)
+local function build_arp_pool(chord_notes, oct_low, oct_high, rigidity_pct,
+                              chord_scale_pcs)
   if #chord_notes == 0 then return {} end
-  local scale_pcs = scale_pitch_classes()
+  -- Use the chord-aware scale (chord tones + global mode, with 3rd/7th
+  -- conflicts resolved to the chord) for the rigidity-driven sprinkle of
+  -- non-chord tones. Falls back to the raw global mode for any caller
+  -- that hasn't supplied one.
+  local scale_pcs = chord_scale_pcs or scale_pitch_classes()
   local chord_set = {}
   for _, n in ipairs(chord_notes) do chord_set[n % 12] = true end
   local scale_prob = rigidity_pct / 100.0
@@ -2664,13 +2754,16 @@ local function resolve_step_prob(abs_beat_pos)
   return state.arp_note_prob / 100.0
 end
 
-local function build_arp_events(chord_notes, chord_dur_beats, chord_abs_beat)
+local function build_arp_events(chord_notes, chord_dur_beats, chord_abs_beat,
+                                chord_root_midi)
   local rate_beats = ARP_RATES[state.arp_rate_idx].beats
   local pattern    = ARP_PATTERNS[state.arp_pattern_idx]
   local gate_frac  = state.arp_gate / 100.0
   local base_vel   = state.arp_velocity
   local human      = state.arp_vel_human
-  local pool = build_arp_pool(chord_notes, state.arp_oct_low, state.arp_oct_high, state.arp_rigidity)
+  local chord_scale_pcs = chord_scale_pc_set(chord_notes, chord_root_midi)
+  local pool = build_arp_pool(chord_notes, state.arp_oct_low, state.arp_oct_high,
+                              state.arp_rigidity, chord_scale_pcs)
   if #pool == 0 then return {} end
   local n_steps = math.ceil(chord_dur_beats / rate_beats)
   local rng_seq = {}
@@ -2937,7 +3030,7 @@ local function arp_live_rebuild(progression)
   local pos_beats = 0
   local cursor_abs = reaper.GetCursorPosition() * reaper.Master_GetTempo() / 60.0
   for _, ch in ipairs(progression) do
-    local arp_evs = build_arp_events(ch.notes, ch.duration, cursor_abs + pos_beats)
+    local arp_evs = build_arp_events(ch.notes, ch.duration, cursor_abs + pos_beats, ch.root_midi)
     for _, ev in ipairs(arp_evs) do
       events[#events+1] = {pitch=ev.pitch, pos=pos_beats+ev.pos, dur=ev.dur, vel=ev.vel}
     end
@@ -3020,7 +3113,7 @@ local function mel_live_rebuild(progression)
   local cursor_abs = reaper.GetCursorPosition() * reaper.Master_GetTempo() / 60.0
   local pos = 0
   for _, ch in ipairs(progression) do
-    build_arp_events(ch.notes, ch.duration, cursor_abs + pos)
+    build_arp_events(ch.notes, ch.duration, cursor_abs + pos, ch.root_midi)
     pos = pos + ch.duration
   end
   -- Live preview generates lazily one progression cycle at a time, keeping
@@ -3410,7 +3503,7 @@ local function write_all()
     local cycle_evs = {}
     local pos = 0
     for _, ch in ipairs(progression) do
-      local arp_evs = build_arp_events(ch.notes, ch.duration, cursor_abs + pos)
+      local arp_evs = build_arp_events(ch.notes, ch.duration, cursor_abs + pos, ch.root_midi)
       for _, ev in ipairs(arp_evs) do
         cycle_evs[#cycle_evs+1] = {pitch=ev.pitch, pos=pos+ev.pos, dur=ev.dur, vel=ev.vel}
       end
