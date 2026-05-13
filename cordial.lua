@@ -2419,29 +2419,57 @@ local function mel_strat_pedal_point(block_dur, chord_notes, scale_notes, chord_
 
   local busy = (state.mel_busyness or 50) / 100.0
 
-  -- Build a weighted off-pedal candidate set around the pedal. Window
-  -- is a perfect fifth either side (pedal octave variation is handled
-  -- separately by the weak-beat octave lift below, so we don't need to
-  -- reach an octave inside the off-pedal palette).
-  local function build_candidates(sn, cr, strong)
+  -- Build a weighted off-pedal candidate set. Anchored to the pedal
+  -- (the home decoration is its diatonic neighbours) but, when the line
+  -- is already off the pedal, also proposes diatonic continuations from
+  -- `prev_pitch` — one step further out (extends the figure into a
+  -- passing-tone run) and one step back in (resolution). Without this,
+  -- every departure is a single-step neighbour that immediately snaps
+  -- back; with it, the line forms little turns and runs that breathe.
+  -- Window around the pedal stays a perfect fifth (octave variation of
+  -- the pedal itself is handled by the weak-beat octave lift below).
+  local function build_candidates(sn, cr, strong, prev_pitch)
     local cands = {}
     local up = diatonic_step(sn, pedal,  1)
     local dn = diatonic_step(sn, pedal, -1)
-    local neigh_w = strong and 2.0 or 3.0   -- stepwise stays the home base
+    -- Neighbours of the pedal: the home decoration. Lighter than before
+    -- so chord tones and continuation steps can compete; lighter still
+    -- on strong beats so downbeat departures reach the harmony.
+    local neigh_w = strong and 1.3 or 2.0
     if up and up ~= pedal then cands[#cands+1] = {p=up, w=neigh_w} end
     if dn and dn ~= pedal then cands[#cands+1] = {p=dn, w=neigh_w} end
+
+    -- Continuation from prev: only when we're already off the pedal.
+    -- Outward = same direction as the current departure (the line keeps
+    -- moving away); inward = step back toward the pedal (the figure
+    -- resolves). Both candidates skip the pedal itself so "return to
+    -- pedal" remains the depart_p gate's job, not a duplicate here.
+    if prev_pitch and (prev_pitch % 12) ~= pedal_pc then
+      local diff    = prev_pitch - pedal
+      local out_dir = (diff > 0) and 1 or -1
+      local outward = diatonic_step(sn, prev_pitch,  out_dir)
+      local inward  = diatonic_step(sn, prev_pitch, -out_dir)
+      if outward and (outward % 12) ~= pedal_pc and math.abs(outward - pedal) <= 7 then
+        cands[#cands+1] = {p=outward, w = strong and 1.1 or 1.8}
+      end
+      if inward and (inward % 12) ~= pedal_pc then
+        cands[#cands+1] = {p=inward, w = strong and 1.6 or 1.3}
+      end
+    end
+
     if cr and #cr > 0 then
       -- Chord-tone weight: low on consonant blocks (the line is mostly
       -- decoration), high on dissonant blocks (the line is resolving).
-      -- Busyness lifts both — more activity, more decoration.
-      local ct_base = pedal_in_chord and (0.4 + 0.9 * busy)
-                                     or  (1.6 + 0.6 * busy)
+      -- Busyness lifts both — more activity, more decoration. Raised
+      -- vs. the neighbours so departures actually reach 3rds/5ths.
+      local ct_base = pedal_in_chord and (0.7 + 1.1 * busy)
+                                     or  (1.9 + 0.7 * busy)
       for _, n in ipairs(cr) do
         local d = math.abs(n - pedal)
         if d > 0 and d <= 7 then
           local w = ct_base * (1.0 - (d - 1) / 9.0)   -- closer = heavier
           if d <= 2 then w = w * 1.4 end              -- stepwise bonus
-          if strong then w = w * 1.3 end              -- strong beats prefer chord tones
+          if strong then w = w * 1.5 end              -- strong beats prefer chord tones
           if w > 0 then cands[#cands+1] = {p=n, w=w} end
         end
       end
@@ -2468,12 +2496,18 @@ local function mel_strat_pedal_point(block_dur, chord_notes, scale_notes, chord_
     local mw = c.metric_weight_here or 0
 
     -- Probability of departing from the pedal on this onset. On
-    -- consonant blocks the pedal sustains more freely; on dissonant
-    -- blocks the line resolves more often. Busyness pushes both.
-    local depart_p = pedal_in_chord and (0.15 + 0.55 * busy)
-                                    or  (0.45 + 0.50 * busy)
-    -- Strong beats favour the pedal (gravitational centre).
-    if mw >= 0.95 then depart_p = depart_p * 0.5 end
+    -- consonant blocks the pedal sustains freely (block-start is
+    -- already forced to the pedal — that's the gravitational anchor);
+    -- on dissonant blocks the line resolves more often. Busyness
+    -- pushes both. A line already off the pedal stays off more
+    -- readily — the decoration figure isn't done after one note.
+    local off_pedal = (prev % 12) ~= pedal_pc
+    local depart_p = pedal_in_chord and (0.25 + 0.55 * busy)
+                                    or  (0.55 + 0.45 * busy)
+    if off_pedal then depart_p = depart_p + 0.20 end
+    -- Strong beats still favour the pedal but not so hard that
+    -- downbeats become a pedal-only event.
+    if mw >= 0.95 then depart_p = depart_p * 0.7 end
 
     if rng_float() > depart_p then
       -- Hold / return to the pedal — but on a weak beat, occasionally
@@ -2488,7 +2522,7 @@ local function mel_strat_pedal_point(block_dur, chord_notes, scale_notes, chord_
     end
 
     local strong = mw >= 0.75
-    local cands  = build_candidates(sn, c.chord_range, strong)
+    local cands  = build_candidates(sn, c.chord_range, strong, prev)
     local pick   = weighted_pick(cands)
     if pick then return pick end
 
