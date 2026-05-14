@@ -346,7 +346,7 @@ local ACCENT_GRID = {
 local ACCENT_GRID_NAMES = {}
 for _, g in ipairs(ACCENT_GRID) do ACCENT_GRID_NAMES[#ACCENT_GRID_NAMES+1] = g.label end
 
-local ARP_PATTERNS = {"Up","Down","Up-Down","Down-Up","Random","Chord","Weave","Pedal","Skip"}
+local ARP_PATTERNS = {"Up","Down","Up-Down","Down-Up","Random","Chord","Weave","Pedal","Skip","Down-Weave","Top Pedal","Converge"}
 
 -- Melody duration grid — all valid note lengths in beats (quarter = 1 beat)
 local MEL_DURATIONS = {
@@ -2831,6 +2831,15 @@ local function apply_arp_pattern(pool, pattern_name, rng_seq)
     end
     if #r == 0 then return pool end
     return r
+  elseif pattern_name == "Down-Weave" then
+    -- mirror of Weave from the top: N, N-2, N-1, N-3, N-2, N-4...
+    local r = {}
+    for i = #pool, 3, -1 do
+      r[#r+1] = pool[i]
+      r[#r+1] = pool[i - 2]
+    end
+    if #r == 0 then return pool end
+    return r
   elseif pattern_name == "Pedal" then
     -- root pedal between each upper note: 1,2,1,3,1,4,1,5...
     local r = {}
@@ -2838,6 +2847,28 @@ local function apply_arp_pattern(pool, pattern_name, rng_seq)
       r[#r+1] = pool[1]
       r[#r+1] = pool[i]
     end
+    if #r == 0 then return pool end
+    return r
+  elseif pattern_name == "Top Pedal" then
+    -- top note pedal between each lower note: N,N-1,N,N-2,N,N-3...
+    local r = {}
+    for i = #pool - 1, 1, -1 do
+      r[#r+1] = pool[#pool]
+      r[#r+1] = pool[i]
+    end
+    if #r == 0 then return pool end
+    return r
+  elseif pattern_name == "Converge" then
+    -- outside-in: 1,N,2,N-1,3,N-2...
+    local r = {}
+    local lo, hi = 1, #pool
+    while lo < hi do
+      r[#r+1] = pool[lo]
+      r[#r+1] = pool[hi]
+      lo = lo + 1
+      hi = hi - 1
+    end
+    if lo == hi then r[#r+1] = pool[lo] end
     if #r == 0 then return pool end
     return r
   elseif pattern_name == "Skip" then
