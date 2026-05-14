@@ -60,10 +60,11 @@ local CHORD_INTERVALS = {
 }
 
 local MODE_CHORDS = {
-  lydian         = {"maj","min","min","maj","maj","min","dim"},
-  lydian_dom     = {"maj","min","min","maj","min","dim","maj"},
-  mixolydian     = {"maj","min","min","maj","min","min","maj"},
+  -- I  II/ii  III/iii  IV/iv  V/v  VI/vi  VII/vii  (built diatonically)
   major          = {"maj","min","min","maj","maj","min","dim"},
+  lydian         = {"maj","maj","min","dim","maj","min","min"},
+  lydian_dom     = {"maj","maj","dim","dim","min","min","aug"},
+  mixolydian     = {"maj","min","dim","maj","min","min","maj"},
   minor          = {"min","dim","maj","min","min","maj","maj"},
   dorian         = {"min","min","maj","maj","min","dim","maj"},
   phrygian       = {"min","maj","maj","min","dim","maj","min"},
@@ -318,33 +319,22 @@ local PROGRESSIONS = {
 
 -- (PROG_NAMES, QUALITY_LIST, QUALITY_DISPLAY replaced by grouped item tables below)
 
--- Arp rate options
+-- Arp rate / accent-grid options, sorted longest → shortest, with triplets
+-- interleaved at their natural pulse.
 local ARP_RATES = {
   {label="1/4",   beats=1.0},
+  {label="1/4T",  beats=2/3},
   {label="1/8",   beats=0.5},
+  {label="1/8T",  beats=1/3},
   {label="1/16",  beats=0.25},
   {label="1/16T", beats=1/6},
   {label="1/32",  beats=0.125},
-  -- Appended to preserve persisted indices in existing projects
-  {label="1/4T",  beats=2/3},
-  {label="1/8T",  beats=1/3},
 }
 local ARP_RATE_NAMES = {}
 for _, r in ipairs(ARP_RATES) do ARP_RATE_NAMES[#ARP_RATE_NAMES+1] = r.label end
 
--- Accent grid options
-local ACCENT_GRID = {
-  {label="1/4",   beats=1.0},
-  {label="1/8",   beats=0.5},
-  {label="1/16",  beats=0.25},
-  {label="1/16T", beats=1/6},
-  {label="1/32",  beats=0.125},
-  -- Appended to preserve persisted indices in existing projects
-  {label="1/4T",  beats=2/3},
-  {label="1/8T",  beats=1/3},
-}
-local ACCENT_GRID_NAMES = {}
-for _, g in ipairs(ACCENT_GRID) do ACCENT_GRID_NAMES[#ACCENT_GRID_NAMES+1] = g.label end
+local ACCENT_GRID = ARP_RATES
+local ACCENT_GRID_NAMES = ARP_RATE_NAMES
 
 local ARP_PATTERNS = {"Up","Down","Up-Down","Down-Up","Random","Chord","Weave","Pedal","Skip","Down-Weave","Top Pedal","Converge","Skip-Reverse","Diverge","Alberti","Random Walk"}
 
@@ -364,18 +354,6 @@ for _, d in ipairs(MEL_DURATIONS) do MEL_DUR_NAMES[#MEL_DUR_NAMES+1] = d.label e
 
 -- Anchor modes for the melody pitch window. Index matches state.mel_anchor_mode.
 local MEL_ANCHOR_NAMES = { "Fixed", "Chord root", "Scale root" }
-
--- Melody generation presets
-local MEL_PRESETS = {
-  "Free",           -- 1: weighted random walk, gap fill, chord-tone bias
-  "Flowing",        -- 2: smooth noise-driven pitch curve, stepwise
-  "Structured",     -- 3: contour following + rhythmic motif repetition
-  "Conversational", -- 4: Markov chain + tension/release
-  "Mechanical",     -- 5: strict intervallic rules, minimal randomness
-  "Phrase & Answer",-- 6: antecedent/consequent call-and-response
-  "Fractal",        -- 7: L-system style self-similar motif expansion
-  "Motif",          -- 8: seed cell repeated with variation
-}
 
 local BASS_STYLES = {"Root", "Root-Fifth", "Walking", "Boogie", "Pattern"}
 -- Pattern step note values: 0=rest, 1=root, 2=fifth, 3=oct-up
@@ -416,7 +394,7 @@ local state = {
   arp_enabled      = true,
   arp_track_name   = "Arp",
   arp_channel      = 1,
-  arp_rate_idx     = 3,
+  arp_rate_idx     = 3,          -- 1/8
   arp_pattern_idx  = 1,
   arp_oct_low      = 3,
   arp_oct_high     = 4,
@@ -426,7 +404,7 @@ local state = {
   arp_note_prob    = 100,
   arp_beat1_prob   = 100,
   arp_beatn_prob   = 100,
-  arp_beatn_idx    = 2,
+  arp_beatn_idx    = 3,          -- 1/8 (offbeat accent grid)
   arp_rigidity     = 0,
 
   -- Melody layer
@@ -434,7 +412,6 @@ local state = {
   mel_track_name   = "Melody",
   mel_channel      = 2,          -- 0-based (MIDI ch 3)
   mel_preset_idx   = 1,          -- index into MEL_PRESET_ITEMS
-  mel_preset_layout_v = 2,       -- bumped on each preset-list reshuffle (drives migration)
   mel_min_dur_idx  = 2,          -- default min = 1/16
   mel_max_dur_idx  = 6,          -- default max = 1/2
   mel_velocity     = 85,
@@ -464,7 +441,7 @@ local state = {
   -- alignment. 0 = current chaotic behaviour; 100 = a 1/4 only starts on a
   -- 1/4 boundary, an 1/8 only on an 1/8 boundary, etc.
   mel_rhythm_rigidity = 0,
-  mel_render_cycles = 4,         -- offline write: number of progression cycles to render
+  render_cycles = 4,         -- offline write: number of progression cycles to render
 
   -- Melody live preview
   mel_live_enabled  = false,
@@ -488,7 +465,7 @@ local state = {
   bass_approach_prob = 70,         -- Walking: prob (0-100) of chromatic approach on last beat
   -- Pattern style
   bass_pattern_steps    = 4,
-  bass_pattern_grid_idx = 2,       -- index into ARP_RATES; default 1/8
+  bass_pattern_grid_idx = 3,       -- index into ARP_RATES; default 1/8
   bass_pattern_notes    = {1,0,1,2, 0,0,0,0},  -- 0=rest,1=root,2=fifth,3=oct
 
   -- Bass live preview
@@ -518,7 +495,7 @@ local state = {
   timesig_denom = 4,
 
   -- Live chord preview
-  live_enabled        = false,
+  chord_live_enabled  = false,
   last_chord_idx      = -1,
   last_notes_on       = {},
   chord_wait_boundary = false,
@@ -601,11 +578,10 @@ local PERSIST_KEYS = {
   "arp_beatn_idx", "arp_rigidity",
   -- Melody layer
   "mel_enabled", "mel_track_name", "mel_channel", "mel_preset_idx",
-  "mel_preset_layout_v",
   "mel_min_dur_idx", "mel_max_dur_idx", "mel_velocity", "mel_vel_human",
   "mel_anchor_mode", "mel_anchor_oct", "mel_range_up", "mel_range_down",
   "mel_busyness", "mel_space", "mel_cadence",
-  "mel_rhythm_rigidity", "mel_render_cycles",
+  "mel_rhythm_rigidity", "render_cycles",
   -- Bass layer
   "bass_enabled", "bass_track_name", "bass_channel", "bass_style_idx",
   "bass_oct", "bass_follow_inv", "bass_velocity", "bass_vel_human",
@@ -619,40 +595,6 @@ local PERSIST_KEYS = {
 }
 
 local EXT_NS = "cordial"  -- namespace for SetProjExtState
-
--- Preset list migrations. Two historical layouts existed before today's
--- 5-preset list ( Free / Motif / Mechanical / Pedal Point / Call&Response ):
---
---   v0: 8 presets ( Free / Flowing / Structured / Conversational /
---                   Mechanical / Phrase&Answer / Fractal / Motif ).
---       Detected by absence of mel_cadence in the save.
---
---   v1: 4 presets ( Free / Phrase / Motif / Mechanical ). Detected by
---       absence of mel_preset_layout_v in the save (mel_cadence present).
---
--- Each mapping below sends old indices → today's 5-preset indices.
-local MEL_PRESET_MIGRATION_V0 = { 1, 1, 1, 1, 3, 1, 2, 2 }   -- 8 → 5
-local MEL_PRESET_MIGRATION_V1 = { 1, 1, 2, 3 }               -- 4 → 5
-
-local function migrate_mel_preset_idx_v0()
-  local v = state.mel_preset_idx
-  if type(v) == "number" and v >= 1 and v <= #MEL_PRESET_MIGRATION_V0 then
-    state.mel_preset_idx = MEL_PRESET_MIGRATION_V0[v]
-  else
-    state.mel_preset_idx = 1
-  end
-  state.mel_preset_layout_v = 2
-end
-
-local function migrate_mel_preset_idx_v1()
-  local v = state.mel_preset_idx
-  if type(v) == "number" and v >= 1 and v <= #MEL_PRESET_MIGRATION_V1 then
-    state.mel_preset_idx = MEL_PRESET_MIGRATION_V1[v]
-  else
-    state.mel_preset_idx = 1
-  end
-  state.mel_preset_layout_v = 2
-end
 
 local function arr_to_str(t)
   local parts = {}
@@ -701,15 +643,6 @@ local function load_proj_state()
   ok, val = reaper.GetProjExtState(0, EXT_NS, "root_idx")
   if not ok or val == "" then return end  -- nothing saved yet for this project
 
-  -- Detect which preset-list layout the save uses, *before* the scalar
-  -- loop overwrites our defaults. We support two historical layouts:
-  --   v0 (8 presets) — predates mel_cadence
-  --   v1 (4 presets) — has mel_cadence but no mel_preset_layout_v
-  local _, cad_val    = reaper.GetProjExtState(0, EXT_NS, "mel_cadence")
-  local _, layout_val = reaper.GetProjExtState(0, EXT_NS, "mel_preset_layout_v")
-  local needs_v0_migration = (cad_val == "")
-  local needs_v1_migration = (not needs_v0_migration) and (layout_val == "")
-
   -- Scalars
   for _, k in ipairs(PERSIST_KEYS) do
     ok, val = reaper.GetProjExtState(0, EXT_NS, k)
@@ -722,22 +655,6 @@ local function load_proj_state()
       else
         state[k] = val
       end
-    end
-  end
-  if needs_v0_migration then
-    migrate_mel_preset_idx_v0()
-  elseif needs_v1_migration then
-    migrate_mel_preset_idx_v1()
-  end
-
-  -- Migrate legacy arp_octaves (relative span) -> arp_oct_low/high (absolute).
-  local _, ao_low_val = reaper.GetProjExtState(0, EXT_NS, "arp_oct_low")
-  if ao_low_val == "" then
-    local _, ao_legacy = reaper.GetProjExtState(0, EXT_NS, "arp_octaves")
-    local n = tonumber(ao_legacy)
-    if n and n >= 1 then
-      state.arp_oct_low  = 3
-      state.arp_oct_high = math.min(8, 3 + n - 1)
     end
   end
 
@@ -1124,11 +1041,6 @@ local function voice_lead_to_chord(prev_pitch, chord_range, max_leap)
     if score < best_score then best, best_score = n, score end
   end
   return best
-end
-
--- Find the index in scale_notes that maps to a given pitch (or nearest).
-local function scale_index_of(scale_notes, pitch)
-  return nearest_idx(scale_notes, pitch)
 end
 
 -- Diatonic step from a pitch by n scale steps (negative = down).
@@ -2759,15 +2671,6 @@ end
 -- ----------------------------------------------------------------
 --  ARP SCALE HELPERS  (unchanged from phase 2)
 -- ----------------------------------------------------------------
-local function scale_pitch_classes()
-  local mode    = MODE_NAMES[state.mode_idx]
-  local ivs     = SCALE_INTERVALS[mode]
-  local root_pc = (state.root_idx - 1) % 12
-  local pcs     = {}
-  for _, iv in ipairs(ivs) do pcs[(root_pc + iv) % 12] = true end
-  return pcs
-end
-
 local function build_arp_pool(chord_notes, oct_low, oct_high, rigidity_pct,
                               chord_scale_pcs)
   if #chord_notes == 0 then return {} end
@@ -2775,7 +2678,7 @@ local function build_arp_pool(chord_notes, oct_low, oct_high, rigidity_pct,
   -- conflicts resolved to the chord) for the rigidity-driven sprinkle of
   -- non-chord tones. Falls back to the raw global mode for any caller
   -- that hasn't supplied one.
-  local scale_pcs = chord_scale_pcs or scale_pitch_classes()
+  local scale_pcs = chord_scale_pcs or scale_pc_set()
   local chord_set = {}
   for _, n in ipairs(chord_notes) do chord_set[n % 12] = true end
   local scale_prob = rigidity_pct / 100.0
@@ -2904,10 +2807,23 @@ local function apply_arp_pattern(pool, pattern_name, rng_seq)
     end
     return r
   elseif pattern_name == "Alberti" then
-    -- bottom, top, middle, top — classical 4-note keyboard figure
+    -- Classical keyboard figure (root, fifth, third, fifth), confined to a
+    -- single octave above pool[1] so the figure reads as Alberti rather than
+    -- wide multi-octave leaps. Falls back to a root-top alternation when the
+    -- pool doesn't have three distinct notes inside that window.
     if #pool < 2 then return pool end
-    local mid = pool[math.floor((#pool + 1) / 2)]
-    return {pool[1], pool[#pool], mid, pool[#pool]}
+    local lo = pool[1]
+    local window = {}
+    for _, p in ipairs(pool) do
+      if p < lo + 12 then window[#window+1] = p else break end
+    end
+    if #window < 3 then
+      local top = window[#window] or pool[#pool]
+      return {lo, top, lo, top}
+    end
+    local top = window[#window]
+    local mid = window[math.ceil(#window / 2)]
+    return {lo, top, mid, top}
   elseif pattern_name == "Random Walk" then
     -- stepwise random motion through pool; smoother than pure Random
     if #pool == 0 then return pool end
@@ -3087,7 +3003,8 @@ local function build_bass_events(chord, chord_dur, next_chord)
           else
             pitch = land
           end
-          pitch = math.max(state.bass_oct * 12,
+          -- Clamp to the same two-octave window the walking line uses.
+          pitch = math.max((state.bass_oct + 1) * 12,
                            math.min((state.bass_oct + 2) * 12 - 1, pitch))
         else
           pitch = voice_lead_to_chord(prev_pitch, scale_bass, 5)
@@ -3111,13 +3028,19 @@ local function build_bass_events(chord, chord_dur, next_chord)
     end
 
   -- ── Boogie ──────────────────────────────────────────────────
+  -- Classic R-5-6-5 shuffle figure, one step per 8th-note (0.5 beats),
+  -- pattern repeats every 4 steps. The pulse is intentionally in beat-
+  -- relative 8ths regardless of time-signature denominator — boogie is
+  -- fundamentally a 4/4 idiom; compound meters will cross pulse groups.
   elseif style == "Boogie" then
     local half_beat = 0.5
     local n_steps   = math.floor(chord_dur / half_beat + 0.5)
     local fifth_pc  = (land % 12 + 7) % 12
     local fifth     = (state.bass_oct + 1) * 12 + fifth_pc
     if fifth < land then fifth = fifth + 12 end
-    -- Upper note: major 6th (+9) for major/dominant, minor 7th (+10) for minor chords.
+    -- Upper note: major 6th (+9) for major/dominant, minor 7th (+10) for
+    -- minor chords. Power chords have no 3rd in CHORD_INTERVALS so they
+    -- read as "not minor" and get the major-6th boogie — the safer default.
     local ivs_chord = CHORD_INTERVALS[chord.quality] or CHORD_INTERVALS["maj"]
     local is_minor  = false
     for _, iv in ipairs(ivs_chord) do if iv == 3 then is_minor = true; break end end
@@ -3167,9 +3090,10 @@ local function live_notes_off()
 end
 
 local function live_notes_on(notes)
-  local ch = state.chord_channel
+  local ch  = state.chord_channel
+  local vel = math.max(1, math.min(127, state.chord_velocity or 90))
   for _, n in ipairs(notes) do
-    reaper.StuffMIDIMessage(0, 0x90 | ch, n, 90)
+    reaper.StuffMIDIMessage(0, 0x90 | ch, n, vel)
     state.last_notes_on[#state.last_notes_on+1] = n
   end
 end
@@ -3537,13 +3461,6 @@ local function load_settings_from_file()
     if k then data[k] = v end
   end
   f:close()
-  -- Detect which preset-list layout this save uses, before the scalar
-  -- loop overwrites our defaults. See migrate_mel_preset_idx_v0/v1.
-  local needs_v0_migration = (data["mel_cadence"] == nil
-                              or data["mel_cadence"] == "")
-  local needs_v1_migration = (not needs_v0_migration)
-                          and (data["mel_preset_layout_v"] == nil
-                               or data["mel_preset_layout_v"] == "")
   for _, k in ipairs(PERSIST_KEYS) do
     local val = data[k]
     if val and val ~= "" then
@@ -3555,19 +3472,6 @@ local function load_settings_from_file()
       else
         state[k] = val
       end
-    end
-  end
-  if needs_v0_migration then
-    migrate_mel_preset_idx_v0()
-  elseif needs_v1_migration then
-    migrate_mel_preset_idx_v1()
-  end
-  -- Migrate legacy arp_octaves -> arp_oct_low/high for file-based loads.
-  if (data["arp_oct_low"] == nil or data["arp_oct_low"] == "") then
-    local n = tonumber(data["arp_octaves"])
-    if n and n >= 1 then
-      state.arp_oct_low  = 3
-      state.arp_oct_high = math.min(8, 3 + n - 1)
     end
   end
   local nd = tonumber(data["num_chords"]) or #state.chord_durations
@@ -3652,7 +3556,7 @@ local function write_all()
 
   local cycle_beats = 0
   for _, ch in ipairs(progression) do cycle_beats = cycle_beats + ch.duration end
-  local cycles      = math.max(1, math.floor(state.mel_render_cycles or 1))
+  local cycles      = math.max(1, math.floor(state.render_cycles or 1))
   local total_beats = cycle_beats * cycles
 
   local ppq        = state.ppq_per_beat
@@ -3992,10 +3896,15 @@ local function draw_ui()
     reaper.ImGui_SetNextItemWidth(ctx, 200)
     local deg_str = table.concat(state.custom_degrees, " ")
     local ce, ns  = reaper.ImGui_InputText(ctx, "##cust", deg_str)
+    if reaper.ImGui_IsItemHovered(ctx) then
+      reaper.ImGui_SetTooltip(ctx,
+        "Scale degrees 1–7 separated by spaces or commas.\n"..
+        "Digits 0/8/9 are ignored. Multi-digit tokens (e.g. 12) are not split.")
+    end
     if ce then
       local nd = {}
-      for d in ns:gmatch("%d") do
-        local di = tonumber(d)
+      for tok in ns:gmatch("[^%s,]+") do
+        local di = tonumber(tok)
         if di and di>=1 and di<=7 then nd[#nd+1]=di end
       end
       if #nd>0 then state.custom_degrees=nd; init_chord_arrays(#nd); reset_live() end
@@ -4069,6 +3978,11 @@ local function draw_ui()
     reaper.ImGui_SetNextItemWidth(ctx, 40)
     local cur_bass = state.chord_bass_overrides[i] or ""
     local sbc, sbv = reaper.ImGui_InputText(ctx, "##sb"..i, cur_bass)
+    if reaper.ImGui_IsItemHovered(ctx) then
+      reaper.ImGui_SetTooltip(ctx,
+        "Slash bass: scale degree 1–7 of the key, optional b/# accidental.\n"..
+        "Examples: 3, b7, #4. Empty = no slash bass.")
+    end
     if sbc then
       sbv = sbv:match("^%s*(.-)%s*$") or ""
       if sbv == "" then
@@ -4091,10 +4005,30 @@ local function draw_ui()
   for _, q in ipairs(state.chord_quality_overrides) do
     if q then any_override = true; break end
   end
+  local any_inversion = false
+  for _, v in ipairs(state.chord_inversions) do
+    if v and v ~= 0 then any_inversion = true; break end
+  end
+  local any_slash = false
+  for _, v in ipairs(state.chord_bass_overrides) do
+    if v then any_slash = true; break end
+  end
   if any_override then
-    if reaper.ImGui_SmallButton(ctx, "Reset all quality overrides") then
+    if reaper.ImGui_SmallButton(ctx, "Reset qualities") then
       for i = 1, #state.chord_quality_overrides do
         state.chord_quality_overrides[i] = nil
+      end
+      reset_live()
+    end
+    reaper.ImGui_SameLine(ctx)
+  end
+  if any_inversion or any_slash then
+    if reaper.ImGui_SmallButton(ctx, "Reset inversions & slashes") then
+      for i = 1, #state.chord_inversions do
+        state.chord_inversions[i] = 0
+      end
+      for i = 1, #state.chord_bass_overrides do
+        state.chord_bass_overrides[i] = nil
       end
       reset_live()
     end
@@ -4159,6 +4093,9 @@ local function draw_ui()
     state.arp_oct_high = math.max(ahv2, state.arp_oct_low)
     state.arp_live_events = nil
   end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_TextDisabled(ctx, string.format("(C%d–B%d)",
+    state.arp_oct_low, state.arp_oct_high))
 
   local agc, agv = sslider("Gate%%##gate", state.arp_gate, 5, 100, 75)
   if agc then state.arp_gate = agv; state.arp_live_events = nil end
@@ -4172,7 +4109,7 @@ local function draw_ui()
   local anpc, anpv = sslider("Prob%%##prob", state.arp_note_prob, 0, 100, 65)
   if anpc then state.arp_note_prob = anpv; state.arp_live_events = nil end
 
-  local arc2, arv2 = sslider("Rigidity##rigid", state.arp_rigidity, 0, 100, 220)
+  local arc2, arv2 = sslider("Scale blend##rigid", state.arp_rigidity, 0, 100, 220)
   if arc2 then state.arp_rigidity = arv2; state.arp_live_events = nil end
   reaper.ImGui_SameLine(ctx)
   local rlabels = {"chord tones only","mostly chord, hint of scale","chord-leaning blend",
@@ -4368,12 +4305,12 @@ local function draw_ui()
   -- ── Live Preview ─────────────────────────────────────────────
   reaper.ImGui_SeparatorText(ctx, "Live Preview")
 
-  local lec, lev = reaper.ImGui_Checkbox(ctx, "Chords##livecheck", state.live_enabled)
+  local lec, lev = reaper.ImGui_Checkbox(ctx, "Chords##livecheck", state.chord_live_enabled)
   if lec then
-    state.live_enabled = lev
+    state.chord_live_enabled = lev
     if not lev then live_notes_off(); state.last_chord_idx=-1 end
   end
-  if state.live_enabled then
+  if state.chord_live_enabled then
     reaper.ImGui_SameLine(ctx)
     reaper.ImGui_TextDisabled(ctx, "Chord Ch")
     live_preview_tick(progression)
@@ -4412,10 +4349,9 @@ local function draw_ui()
     bass_live_tick(progression)
   end
 
-  if state.live_enabled or state.arp_live_enabled or state.mel_live_enabled
+  if state.chord_live_enabled or state.arp_live_enabled or state.mel_live_enabled
       or state.bass_live_enabled then
-    reaper.ImGui_SameLine(ctx)
-    reaper.ImGui_TextDisabled(ctx, "  Press Play to hear")
+    reaper.ImGui_TextDisabled(ctx, "Press Play to hear  ·  edits re-sync at the next cycle boundary")
   end
 
   -- ── Seed & Keep ──────────────────────────────────────────────
@@ -4448,8 +4384,8 @@ local function draw_ui()
   reaper.ImGui_SameLine(ctx)
   reaper.ImGui_SetNextItemWidth(ctx, 90)
   local rcc, rcv = reaper.ImGui_SliderInt(ctx, "cycles##rendercycles",
-                                          state.mel_render_cycles, 1, 32)
-  if rcc then state.mel_render_cycles = rcv end
+                                          state.render_cycles, 1, 32)
+  if rcc then state.render_cycles = rcv end
 
   reaper.ImGui_Spacing(ctx)
   if reaper.ImGui_Button(ctx, "Save Settings...", 130, 0) then save_settings_to_file() end
@@ -4459,6 +4395,8 @@ local function draw_ui()
   reaper.ImGui_Spacing(ctx)
   reaper.ImGui_Separator(ctx)
   reaper.ImGui_TextDisabled(ctx, state.status_msg)
+  reaper.ImGui_TextDisabled(ctx,
+    "Keys (passthrough): Space = play/stop  ·  Home = start  ·  End = end of project")
 end
 
 -- ----------------------------------------------------------------
