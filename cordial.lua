@@ -346,7 +346,7 @@ local ACCENT_GRID = {
 local ACCENT_GRID_NAMES = {}
 for _, g in ipairs(ACCENT_GRID) do ACCENT_GRID_NAMES[#ACCENT_GRID_NAMES+1] = g.label end
 
-local ARP_PATTERNS = {"Up","Down","Up-Down","Down-Up","Random","Chord","Weave","Pedal","Skip","Down-Weave","Top Pedal","Converge"}
+local ARP_PATTERNS = {"Up","Down","Up-Down","Down-Up","Random","Chord","Weave","Pedal","Skip","Down-Weave","Top Pedal","Converge","Skip-Reverse","Diverge","Alberti","Random Walk"}
 
 -- Melody duration grid — all valid note lengths in beats (quarter = 1 beat)
 local MEL_DURATIONS = {
@@ -2876,6 +2876,56 @@ local function apply_arp_pattern(pool, pattern_name, rng_seq)
     local r = {}
     for i = 1, #pool, 2 do r[#r+1] = pool[i] end
     for i = 2, #pool, 2 do r[#r+1] = pool[i] end
+    return r
+  elseif pattern_name == "Skip-Reverse" then
+    -- descending broken thirds: N,N-2,N-4..., N-1,N-3,N-5...
+    local r = {}
+    for i = #pool, 1, -2 do r[#r+1] = pool[i] end
+    for i = #pool - 1, 1, -2 do r[#r+1] = pool[i] end
+    return r
+  elseif pattern_name == "Diverge" then
+    -- inside-out: middle outward (mirror of Converge)
+    if #pool == 0 then return pool end
+    local r = {}
+    local n = #pool
+    local lo, hi
+    if n % 2 == 1 then
+      local m = math.floor(n / 2) + 1
+      r[#r+1] = pool[m]
+      lo, hi = m - 1, m + 1
+    else
+      lo = n / 2; hi = lo + 1
+      r[#r+1] = pool[lo]; r[#r+1] = pool[hi]
+      lo = lo - 1; hi = hi + 1
+    end
+    while lo >= 1 do
+      r[#r+1] = pool[lo]; r[#r+1] = pool[hi]
+      lo = lo - 1; hi = hi + 1
+    end
+    return r
+  elseif pattern_name == "Alberti" then
+    -- bottom, top, middle, top — classical 4-note keyboard figure
+    if #pool < 2 then return pool end
+    local mid = pool[math.floor((#pool + 1) / 2)]
+    return {pool[1], pool[#pool], mid, pool[#pool]}
+  elseif pattern_name == "Random Walk" then
+    -- stepwise random motion through pool; smoother than pure Random
+    if #pool == 0 then return pool end
+    local r = {}
+    local idx = math.floor((#pool + 1) / 2)
+    if idx < 1 then idx = 1 end
+    for i = 1, #rng_seq do
+      r[#r+1] = pool[idx]
+      local u = rng_seq[i]
+      local step
+      if u < 0.45 then step = 1
+      elseif u < 0.9 then step = -1
+      else step = 0
+      end
+      local nx = idx + step
+      if nx < 1 or nx > #pool then nx = idx - step end
+      idx = nx
+    end
     return r
   end
   return pool
