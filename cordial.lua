@@ -178,6 +178,13 @@ local PROGRESSIONS = {
   {cat="Neo-Soul",  name="im9  IVdom9 (Dorian vamp)",              degrees={1,4},             qualities={"min9","dom9"},                         mode="dorian"},
   {cat="Neo-Soul",  name="Imaj7  iii7  IVmaj7  iv6 (modal mix)",   degrees={1,3,4,4},         qualities={"maj7","min7","maj7","min6"},           mode="major"},
   {cat="Neo-Soul",  name="iii7  vi7  ii9  V13",                    degrees={3,6,2,5},         qualities={"min7","min7","min9","dom9"},           mode="major"},
+  -- 13sus4 voiced as IVmaj7/V (Fmaj7/G in C): R, 4, 5, b7, 9, 13.
+  -- D'Angelo / Bill Evans / Stevie idioms — the V13sus4 substitute.
+  {cat="Neo-Soul",  name="Imaj7  IVmaj7/V  Imaj7  IVmaj7/V (D'Angelo sus hang)", degrees={1,4,1,4}, qualities={"maj7","maj7","maj7","maj7"},     mode="major", inversions={0,"5",0,"5"}},
+  {cat="Neo-Soul",  name="Imaj7  iii7  IVmaj7/V  Imaj7 (Bill Evans sus turn)",   degrees={1,3,4,1}, qualities={"maj7","min7","maj7","maj7"},     mode="major", inversions={0,0,"5",0}},
+  {cat="Neo-Soul",  name="ii7  IVmaj7/V  Imaj7  Imaj7 (sus ii-V-I)",             degrees={2,4,1,1}, qualities={"min7","maj7","maj7","maj7"},     mode="major", inversions={0,"5",0,0}},
+  {cat="Neo-Soul",  name="Imaj7  vi7  ii7  IVmaj7/V (Isn't She Lovely turn)",    degrees={1,6,2,4}, qualities={"maj7","min7","min7","maj7"},     mode="major", inversions={0,0,0,"5"}},
+  {cat="Neo-Soul",  name="iii7  vi7  ii9  IVmaj7/V (Overjoyed flow)",            degrees={3,6,2,4}, qualities={"min7","min7","min9","maj7"},     mode="major", inversions={0,0,0,"5"}},
 
   -- ── Jazz ─────────────────────────────────────────────────────
   {cat="Jazz",      name="Imaj7  vi7  ii7  V7 (turnaround)",       degrees={1,6,2,5},         qualities={"maj7","min7","min7","dom7"},           mode="major", inversions={0,0,0,1}},
@@ -225,6 +232,13 @@ local PROGRESSIONS = {
   {cat="Funk",      name="I7 vamp (one-chord)",                    degrees={1,1,1,1},         qualities={"dom7","dom7","dom7","dom7"},           mode="mixolydian"},
   {cat="Funk",      name="im7  bIII7  bVII7  IV7",                 degrees={1,3,7,4},         qualities={"min7","dom7","dom7","dom7"},           mode="dorian"},
   {cat="Funk",      name="im9  bVII7 (Funk tonic pedal)",          degrees={1,7},             qualities={"min9","dom7"},                         mode="dorian", inversions={0,"1"}},
+
+  -- ── Disco / EWF ──────────────────────────────────────────────
+  -- Major-key 9ths and the IVmaj7/V sus13 button on the build.
+  {cat="Disco",     name="IVmaj7  iii7  ii7  IVmaj7/V (After the Love)",   degrees={4,3,2,4},  qualities={"maj7","min7","min7","maj7"},           mode="major", inversions={0,0,0,"5"}},
+  {cat="Disco",     name="vi9  ii9  IVmaj7/V  Imaj9 (September lift)",     degrees={6,2,4,1},  qualities={"min9","min9","maj7","maj9"},           mode="major", inversions={0,0,"5",0}},
+  {cat="Disco",     name="iii7  vi9  IVmaj7/V  iii7 (Reasons vamp)",       degrees={3,6,4,3},  qualities={"min7","min9","maj7","min7"},           mode="major", inversions={0,0,"5",0}},
+  {cat="Disco",     name="Imaj9  vi9  IVmaj7/V  Imaj9 (Fantasy float)",    degrees={1,6,4,1},  qualities={"maj9","min9","maj7","maj9"},           mode="major", inversions={0,0,"5",0}},
 
   -- ── Rock ─────────────────────────────────────────────────────
   {cat="Rock",      name="I  bVII  IV  I (classic)",               degrees={1,7,4,1},         qualities={"maj","maj","maj","maj"},               mode="mixolydian"},
@@ -289,6 +303,17 @@ local PROGRESSIONS = {
   {cat="Cinematic", name="i  bIII  iv  bVI (lament, walking)",     degrees={1,3,4,6},         qualities={"min","maj","min","maj"},               mode="minor", inversions={0,2,1,"5"}},
   {cat="Cinematic", name="i  V/iv  iv  V (trailer build)",         degrees={1,1,4,5},         qualities={"min","dom7","min","maj"},              mode="harmonic_minor"},
   {cat="Cinematic", name="i  i  i  IV (Stairway descent)",         degrees={1,1,1,4},         qualities={"min","min","min","maj"},               mode="minor", inversions={0,"#7","7",1}},
+
+  -- ── Game / JRPG (Japanese jazzy) ─────────────────────────────
+  -- Mitsuda, Uematsu, Shimomura, Meguro, Kanno, Sakamoto — all lean
+  -- hard on the IVmaj7/V sus13 voicing as a non-functional V sub.
+  {cat="Game/JRPG", name="Imaj7  IIIm7  IVmaj7  IVmaj7/V (Schala flow, Mitsuda)", degrees={1,3,4,4}, qualities={"maj7","min7","maj7","maj7"},     mode="major", inversions={0,0,0,"5"}},
+  {cat="Game/JRPG", name="IVmaj7  iii7  IVmaj7/V  Imaj7 (Aerith cadence, Uematsu)", degrees={4,3,4,1}, qualities={"maj7","min7","maj7","maj7"},   mode="major", inversions={0,0,"5",0}},
+  {cat="Game/JRPG", name="Imaj7  IImaj7  IVmaj7/V  Imaj7 (Lyd sus float)",        degrees={1,2,4,1}, qualities={"maj7","maj7","maj7","maj7"},     mode="lydian", inversions={0,0,"5",0}},
+  {cat="Game/JRPG", name="iim7  V7  IIIm7  IVmaj7/V (Persona jazz turn, Meguro)", degrees={2,5,3,4}, qualities={"min7","dom7","min7","maj7"},     mode="major", inversions={0,0,0,"5"}},
+  {cat="Game/JRPG", name="vi7  IVmaj7/V  Imaj7  IIIm7 (Bebop cool turn, Kanno)",  degrees={6,4,1,3}, qualities={"min7","maj7","maj7","min7"},     mode="major", inversions={0,"5",0,0}},
+  {cat="Game/JRPG", name="IIIm7  vi9  IVmaj7/V  Imaj9 (Sakamoto resolve)",        degrees={3,6,4,1}, qualities={"min7","min9","maj7","maj9"},     mode="major", inversions={0,0,"5",0}},
+  {cat="Game/JRPG", name="Imaj7  bVIImaj7  IVmaj7/V  Imaj7 (Mixo sus, Shimomura)",degrees={1,7,4,1}, qualities={"maj7","maj7","maj7","maj7"},     mode="mixolydian", inversions={0,0,"5",0}},
 
   -- ── Modal Colour ─────────────────────────────────────────────
   {cat="Modal",     name="i  bII  bVII  i (Phrygian)",             degrees={1,2,7,1},         qualities={"min","maj","maj","min"},               mode="phrygian"},
