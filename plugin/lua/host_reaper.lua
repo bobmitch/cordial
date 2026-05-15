@@ -69,15 +69,11 @@ local diatonic_step        = voicing.diatonic_step
 local diatonic_neighbor    = voicing.diatonic_neighbor
 local leading_tone_to      = voicing.leading_tone_to
 
--- Host-side wrappers around voicing.scale_pc_set / chord_scale_pc_set
--- that capture the current global key state so the bulk of the host
--- code reads unchanged.
-local function scale_pc_set()
-  return voicing.scale_pc_set(MODE_NAMES[state.mode_idx], state.root_idx)
-end
-local function chord_scale_pc_set(chord_notes, chord_root_midi)
-  return voicing.chord_scale_pc_set(chord_notes, chord_root_midi, scale_pc_set())
-end
+-- scale_pc_set / chord_scale_pc_set wrappers live further down,
+-- AFTER the `state` table is declared. They reference state.* and
+-- Lua resolves upvalues at function-definition time, so defining them
+-- here would bind `state` to a global lookup (nil) instead of the
+-- host-side local. Tripped over by a real error in REAPER.
 
 
 -- (PROG_NAMES, QUALITY_LIST, QUALITY_DISPLAY replaced by grouped item tables below)
@@ -280,6 +276,17 @@ local state = {
 
   status_msg = "Ready.",
 }
+
+-- Host-side wrappers around voicing.scale_pc_set / chord_scale_pc_set.
+-- Must be defined AFTER `state` is in scope (see note in the import
+-- block at the top of this file) — Lua resolves upvalues lexically at
+-- function-definition time.
+local function scale_pc_set()
+  return voicing.scale_pc_set(MODE_NAMES[state.mode_idx], state.root_idx)
+end
+local function chord_scale_pc_set(chord_notes, chord_root_midi)
+  return voicing.chord_scale_pc_set(chord_notes, chord_root_midi, scale_pc_set())
+end
 
 local function init_chord_arrays(n)
   state.chord_durations       = {}
