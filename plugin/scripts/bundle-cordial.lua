@@ -20,6 +20,7 @@
 -- theory is already in scope. Append new modules as Phase 2 progresses.
 local CORE_MODULES = {
   "theory",
+  "progressions",
 }
 
 local function read_file(path)

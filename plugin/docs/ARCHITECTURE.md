@@ -43,7 +43,7 @@ plugin/
 │                         # original cordial.lua during phase 2. Each file
 │                         # is a Lua module (`local M = {}; ... return M`).
 │       ├── theory.lua    # ✅ extracted (phase 2a)
-│       ├── progressions.lua  # 🚧 phase 2b
+│       ├── progressions.lua  # ✅ extracted (phase 2b)
 │       ├── rng.lua       # 🚧 phase 2c
 │       ├── chord.lua     # 🚧 phase 2d
 │       ├── arp.lua       # 🚧 phase 2e

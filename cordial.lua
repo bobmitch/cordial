@@ -89,54 +89,22 @@ M.SCALE_INTERVALS = {
 return M
 end)()
 
--- ============================================================
---  cordial  –  REAPER chord / arp / melody generator
---
---  Generates MIDI items at the edit cursor for three independent
---  layers, each on its own auto-created track, all driven from a
---  single seeded RNG so a given seed + parameter set is reproducible.
---
---  Layers:
---    • Chords   – block chords from a large catalog of progression
---                 presets (diatonic, modal, borrowed, jazz, blues,
---                 cadential, etc.), grouped by category. Each preset
---                 carries its own mode so borrowed-chord labels
---                 (bVII, bII, …) render at the correct root.
---                 Per-slot chord-quality overrides are supported.
---    • Arp      – chord-tone pool across a configurable octave range,
---                 pattern (Up / Down / UpDown / Random / Chord),
---                 stepped at a selectable rate.
---    • Melody   – eight generation presets (free, flowing, structured,
---                 conversational, mechanical, phrase/answer, fractal,
---                 motif) sharing a phrase-arc tension/density envelope,
---                 metric-weight beat scoring, diatonic voice leading,
---                 chromatic colour (passing tones), rigidity (snap
---                 toward chord tones), min/max note duration, metre
---                 enforcement, and busyness (arc-shaped density /
---                 clustering around bar / half-bar landmarks).
---
---  Live MIDI preview for each layer updates as parameters change.
---  Time signature is read live at the cursor every frame; durations
---  flow as beats and convert to PPQ only at MIDI write time.
---  User-facing parameters persist per-project via SetProjExtState.
---
---  Requires: REAPER + ReaImGui extension (install via ReaPack).
--- ============================================================
-
-local ctx = reaper.ImGui_CreateContext("Chord Generator")
-
-
+-- ================================================================
+--  bundled from plugin/lua/core/progressions.lua
+-- ================================================================
+local progressions = (function()
 -- ----------------------------------------------------------------
---  Module imports
---  (resolved by plugin/scripts/bundle-cordial.lua before this file)
+--  core/progressions.lua  —  preset progression catalog
+--
+--  The full flat array of progression presets used by the chord-layer
+--  generator. Grouped by `cat` for the UI dropdown but consumed by the
+--  generator in flat-array order. Each entry's `mode` field is the
+--  single source of truth for borrowed-chord root resolution — never
+--  collapse a preset's mode for "simplicity", chord roots resolve via
+--  `theory.SCALE_INTERVALS[mode][deg]`.
 -- ----------------------------------------------------------------
-local NOTE_NAMES       = theory.NOTE_NAMES
-local CHORD_INTERVALS  = theory.CHORD_INTERVALS
-local MODE_CHORDS      = theory.MODE_CHORDS
-local MODE_NAMES       = theory.MODE_NAMES
-local MODE_DISPLAY     = theory.MODE_DISPLAY
-local SCALE_INTERVALS  = theory.SCALE_INTERVALS
-local mode_idx_by_name = theory.mode_idx_by_name
+
+local M = {}
 
 -- ----------------------------------------------------------------
 --  PROGRESSION / FLAVOUR PRESETS
@@ -165,7 +133,7 @@ local mode_idx_by_name = theory.mode_idx_by_name
 --  that degree flatted. e.g. true bVII needs minor/dorian/phrygian/
 --  mixolydian/lydian_dom/locrian (all give deg7 = +10 semitones).
 -- ----------------------------------------------------------------
-local PROGRESSIONS = {
+M.PROGRESSIONS = {
   -- ── Diatonic (Major-key staples) ─────────────────────────────
   {cat="Diatonic",  name="I  IV  V  I",                            degrees={1,4,5,1},         qualities={nil,nil,nil,nil},                       mode="major"},
   {cat="Diatonic",  name="I  V  vi  IV (Axis, desc bass)",         degrees={1,5,6,4},         qualities={nil,nil,nil,nil},                       mode="major", inversions={0,1,0,0}},
@@ -382,6 +350,60 @@ local PROGRESSIONS = {
   -- ── Custom ───────────────────────────────────────────────────
   {cat="Custom",    name="Custom",                                 degrees={},                qualities={},                                      mode=nil},
 }
+
+return M
+end)()
+
+-- ============================================================
+--  cordial  –  REAPER chord / arp / melody generator
+--
+--  Generates MIDI items at the edit cursor for three independent
+--  layers, each on its own auto-created track, all driven from a
+--  single seeded RNG so a given seed + parameter set is reproducible.
+--
+--  Layers:
+--    • Chords   – block chords from a large catalog of progression
+--                 presets (diatonic, modal, borrowed, jazz, blues,
+--                 cadential, etc.), grouped by category. Each preset
+--                 carries its own mode so borrowed-chord labels
+--                 (bVII, bII, …) render at the correct root.
+--                 Per-slot chord-quality overrides are supported.
+--    • Arp      – chord-tone pool across a configurable octave range,
+--                 pattern (Up / Down / UpDown / Random / Chord),
+--                 stepped at a selectable rate.
+--    • Melody   – eight generation presets (free, flowing, structured,
+--                 conversational, mechanical, phrase/answer, fractal,
+--                 motif) sharing a phrase-arc tension/density envelope,
+--                 metric-weight beat scoring, diatonic voice leading,
+--                 chromatic colour (passing tones), rigidity (snap
+--                 toward chord tones), min/max note duration, metre
+--                 enforcement, and busyness (arc-shaped density /
+--                 clustering around bar / half-bar landmarks).
+--
+--  Live MIDI preview for each layer updates as parameters change.
+--  Time signature is read live at the cursor every frame; durations
+--  flow as beats and convert to PPQ only at MIDI write time.
+--  User-facing parameters persist per-project via SetProjExtState.
+--
+--  Requires: REAPER + ReaImGui extension (install via ReaPack).
+-- ============================================================
+
+local ctx = reaper.ImGui_CreateContext("Chord Generator")
+
+
+-- ----------------------------------------------------------------
+--  Module imports
+--  (resolved by plugin/scripts/bundle-cordial.lua before this file)
+-- ----------------------------------------------------------------
+local NOTE_NAMES       = theory.NOTE_NAMES
+local CHORD_INTERVALS  = theory.CHORD_INTERVALS
+local MODE_CHORDS      = theory.MODE_CHORDS
+local MODE_NAMES       = theory.MODE_NAMES
+local MODE_DISPLAY     = theory.MODE_DISPLAY
+local SCALE_INTERVALS  = theory.SCALE_INTERVALS
+local mode_idx_by_name = theory.mode_idx_by_name
+local PROGRESSIONS     = progressions.PROGRESSIONS
+
 
 -- (PROG_NAMES, QUALITY_LIST, QUALITY_DISPLAY replaced by grouped item tables below)
 
