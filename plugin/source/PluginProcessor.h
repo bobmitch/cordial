@@ -25,6 +25,7 @@ public:
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -32,7 +33,9 @@ public:
     const juce::String getName() const override         { return "Cordial"; }
     bool acceptsMidi()  const override                  { return true; }
     bool producesMidi() const override                  { return true; }
-    bool isMidiEffect() const override                  { return true; }
+    // Reported as a normal Fx (not a pure MIDI effect) so REAPER's audio
+    // chain isn't broken when Cordial is inserted before a synth.
+    bool isMidiEffect() const override                  { return false; }
     double getTailLengthSeconds() const override        { return 0.0; }
 
     int  getNumPrograms() override                      { return 1; }

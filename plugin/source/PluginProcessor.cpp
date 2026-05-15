@@ -7,7 +7,9 @@ namespace
 }
 
 CordialAudioProcessor::CordialAudioProcessor()
-    : AudioProcessor(BusesProperties())   // MIDI effect: no audio buses
+    : AudioProcessor(BusesProperties()
+                       .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
+                       .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
     if (auto chord = luaHost.getPhase1Chord())
     {
@@ -39,11 +41,29 @@ void CordialAudioProcessor::prepareToPlay (double, int)
     chordOn    = false;
 }
 
+bool CordialAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
+{
+    // Accept mono or stereo, but the main input and output channel sets must
+    // match — JUCE's default is permissive, this just makes the contract
+    // explicit and stops oddball hosts from probing N-channel configs.
+    const auto& mainOut = layouts.getMainOutputChannelSet();
+    if (mainOut != juce::AudioChannelSet::mono()
+     && mainOut != juce::AudioChannelSet::stereo())
+        return false;
+    return mainOut == layouts.getMainInputChannelSet();
+}
+
 void CordialAudioProcessor::processBlock (juce::AudioBuffer<float>& audio,
                                           juce::MidiBuffer& midi)
 {
-    audio.clear();
-    midi.clear();   // generator: we don't pass through input
+    // Audio passthrough: leave `audio` untouched so any signal arriving from
+    // upstream FX flows through unchanged. JUCE's in-place buffer semantics
+    // mean "do nothing" == "passthrough".
+    //
+    // MIDI: we keep incoming events too (so MIDI items / keyboard input on
+    // this track still reach downstream FX) and add our generated chord on
+    // top. The phase-1 chord fires once on transport start.
+    juce::ignoreUnused (audio);
 
     auto* ph = getPlayHead();
     juce::AudioPlayHead::PositionInfo pos;

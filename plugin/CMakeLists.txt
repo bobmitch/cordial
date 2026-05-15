@@ -76,7 +76,11 @@ juce_add_plugin(CordialVST
     PLUGIN_CODE             Cdvs
     FORMATS                 VST3 AU Standalone
     PRODUCT_NAME            "Cordial"
-    IS_MIDI_EFFECT          TRUE
+    # Intentionally NOT IS_MIDI_EFFECT: REAPER (and several other DAWs) handle
+    # zero-audio-bus VST3 plugins poorly — placing one in an FX chain silences
+    # everything downstream. Ship as a normal stereo Fx that happens to
+    # produce MIDI and passes audio through unchanged. The cost is one extra
+    # bus declaration; the win is "works in every host without surgery".
     NEEDS_MIDI_INPUT        TRUE
     NEEDS_MIDI_OUTPUT       TRUE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
