@@ -437,6 +437,12 @@ local state = {
   mel_track_name   = "Melody",
   mel_channel      = 2,          -- 0-based (MIDI ch 3)
   mel_preset_idx   = 1,          -- index into MEL_PRESET_ITEMS
+  -- Phrasing: genre-flavoured colouring layered over any preset/progression.
+  -- 1 = None (diatonic, current behaviour)
+  -- 2 = Bluesy    (b3/b7 added to the pool, b3→3 / b7→1 / b5→5 bends)
+  -- 3 = Pentatonic (scale pool restricted to major or minor pentatonic
+  --                 plus the current chord's tones)
+  mel_phrasing_idx = 1,
   mel_min_dur_idx  = 2,          -- default min = 1/16
   mel_max_dur_idx  = 6,          -- default max = 1/2
   mel_velocity     = 85,
@@ -603,6 +609,7 @@ local PERSIST_KEYS = {
   "arp_beatn_idx", "arp_rigidity",
   -- Melody layer
   "mel_enabled", "mel_track_name", "mel_channel", "mel_preset_idx",
+  "mel_phrasing_idx",
   "mel_min_dur_idx", "mel_max_dur_idx", "mel_velocity", "mel_vel_human",
   "mel_anchor_mode", "mel_anchor_oct", "mel_range_up", "mel_range_down",
   "mel_busyness", "mel_space", "mel_cadence",
@@ -971,6 +978,23 @@ local function scale_pc_set()
   local ivs     = SCALE_INTERVALS[mode]
   local root_pc = (state.root_idx - 1) % 12
   local pcs     = {}
+  for _, iv in ipairs(ivs) do pcs[(root_pc + iv) % 12] = true end
+  return pcs
+end
+
+-- Pentatonic pitch-class set for a given key root and mode. Major-flavoured
+-- modes use major pentatonic (1,2,3,5,6); minor-flavoured modes use minor
+-- pentatonic (1,b3,4,5,b7). Used by the Pentatonic phrasing to restrict
+-- the melody's scale pool while leaving the harmony untouched.
+local PENT_MAJOR_INTERVALS = {0, 2, 4, 7, 9}
+local PENT_MINOR_INTERVALS = {0, 3, 5, 7, 10}
+local function pentatonic_pcs_for(root_pc, mode_name)
+  local minor_modes = {
+    minor=true, dorian=true, phrygian=true,
+    locrian=true, harmonic_minor=true,
+  }
+  local ivs = minor_modes[mode_name] and PENT_MINOR_INTERVALS or PENT_MAJOR_INTERVALS
+  local pcs = {}
   for _, iv in ipairs(ivs) do pcs[(root_pc + iv) % 12] = true end
   return pcs
 end
@@ -1809,8 +1833,47 @@ end
 --
 --  Returns a colour pitch (number) or nil if no figure is appropriate.
 -- ----------------------------------------------------------------
+
+-- Bluesy phrasing helper: given a target chord-tone target_pc, return the
+-- blue note that idiomatically slides into it (b3→3, b7→1, b5→5/4) at
+-- the pitch closest to to_pitch. Returns nil if the target isn't one of
+-- the blues bend targets, or if the resulting pitch would be too far from
+-- from_pitch to read as an embellishment.
+local function bluesy_blue_note(from_pitch, to_pitch, chord_root_pc)
+  if not chord_root_pc then return nil end
+  local r       = chord_root_pc
+  local target  = to_pitch % 12
+  local maj3_pc = (r + 4)  % 12
+  local p4_pc   = (r + 5)  % 12
+  local p5_pc   = (r + 7)  % 12
+  local root_pc = r
+
+  local blue_pc
+  if     target == maj3_pc                  then blue_pc = (r + 3)  % 12  -- b3 → 3
+  elseif target == root_pc                  then blue_pc = (r + 10) % 12  -- b7 → 1
+  elseif target == p5_pc or target == p4_pc then blue_pc = (r + 6)  % 12  -- b5 → 5/4
+  else return nil end
+
+  -- Snap blue_pc to the pitch closest to to_pitch (so the slide is
+  -- adjacent, not an octave displaced).
+  local diff = (blue_pc - (to_pitch % 12)) % 12
+  if diff > 6 then diff = diff - 12 end
+  local blue = to_pitch + diff
+  if math.abs(blue - from_pitch) > 5 then return nil end
+  return blue
+end
+
 local function maybe_insert_colour(from_pitch, to_pitch, scale_notes,
-                                    scale_pcs, chord_pcs, target_is_strong)
+                                    scale_pcs, chord_pcs, target_is_strong,
+                                    chord_root_pc)
+  -- Bluesy phrasing fires its own bend regardless of mel_colour: the blue
+  -- note IS the phrasing identity, not a density-controlled embellishment.
+  if (state.mel_phrasing_idx or 1) == 2 and chord_root_pc
+     and rng_float() < 0.55 then
+    local blue = bluesy_blue_note(from_pitch, to_pitch, chord_root_pc)
+    if blue then return blue end
+  end
+
   if state.mel_colour == 0 then return nil end
   local colour_prob = state.mel_colour / 100.0
   if rng_float() > colour_prob then return nil end
@@ -2057,7 +2120,8 @@ local function mel_fill_block(block_dur, chord_notes, scale_notes, chord_range,
         local colour = nil
         if colour_enabled and not first_onset and dur_slots > min_slots then
           colour = maybe_insert_colour(prev, pitch, scale_notes,
-                                       scale_pcs, chord_pcs, target_is_strong)
+                                       scale_pcs, chord_pcs, target_is_strong,
+                                       context.chord_root_pc)
         end
         if colour then
           local cd = grid  -- exactly 1 grid step
@@ -2644,6 +2708,28 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
     local chord_scale_pcs, chord_is_altered =
         chord_scale_pc_set(ch.notes, ch.root_midi)
     local lo_p, hi_p   = mel_window(ch.root_midi)
+
+    -- Phrasing reshapes the per-chord scale pool. Bluesy adds the b3/b7
+    -- so the walker can land on them (not just slide through); Pentatonic
+    -- restricts the pool to a 5-note subset unioned with the chord's tones
+    -- so chord-tone landings on 3rds/7ths still work even when those
+    -- aren't in the pentatonic.
+    local chord_root_pc = (ch.root_midi or 0) % 12
+    local phrasing      = state.mel_phrasing_idx or 1
+    if phrasing == 2 then  -- Bluesy
+      chord_scale_pcs[(chord_root_pc + 3)  % 12] = true   -- b3 (blue 3rd)
+      chord_scale_pcs[(chord_root_pc + 10) % 12] = true   -- b7 (dom 7)
+    elseif phrasing == 3 then  -- Pentatonic
+      local pent_pcs = pentatonic_pcs_for(
+        (state.root_idx - 1) % 12, MODE_NAMES[state.mode_idx])
+      local chord_pcs_local = chord_pc_set(ch.notes)
+      local kept = {}
+      for pc in pairs(chord_scale_pcs) do
+        if pent_pcs[pc] or chord_pcs_local[pc] then kept[pc] = true end
+      end
+      if next(kept) then chord_scale_pcs = kept end
+    end
+
     local scale_notes  = pcs_to_notes_in_range(chord_scale_pcs, lo_p, hi_p)
     local chord_range  = chord_notes_in_range(ch.notes, lo_p, hi_p)
     if #scale_notes == 0 then
@@ -2653,6 +2739,7 @@ local function build_melody_cycle(progression, context, events, cycle_offset)
       context.chord_meta       = ch
       context.scale_pcs_chord  = chord_scale_pcs
       context.chord_is_altered = chord_is_altered
+      context.chord_root_pc    = chord_root_pc
       context.is_first_block   = (cycle_offset == 0 and ci == 1)
       context.block_idx        = ci
       context.block_skeleton   = skeleton[ci]
@@ -3837,6 +3924,9 @@ local MEL_PRESET_ITEMS = {
   {label="Call & Response", group="Texture"},
 }
 
+-- Phrasing options layered over any preset (mutually exclusive).
+local MEL_PHRASING_ITEMS = { "None", "Bluesy", "Pentatonic" }
+
 -- Chord quality items grouped
 local QUALITY_ITEMS = {
   {label="auto (mode)",  group="Default"},
@@ -4176,6 +4266,10 @@ local function draw_ui()
   reaper.ImGui_SetNextItemWidth(ctx, 170)
   local mpc, mpv = combo_grouped("Preset##melpre", MEL_PRESET_ITEMS, state.mel_preset_idx)
   if mpc then state.mel_preset_idx = mpv; state.mel_live_events=nil end
+  reaper.ImGui_SameLine(ctx)
+  reaper.ImGui_SetNextItemWidth(ctx, 105)
+  local mphc, mphv = combo("Phrasing##melphr", MEL_PHRASING_ITEMS, state.mel_phrasing_idx)
+  if mphc then state.mel_phrasing_idx = mphv; state.mel_live_events=nil end
   reaper.ImGui_SameLine(ctx)
   local mbusyc, mbusyv = sslider("Busy##mbusy", state.mel_busyness, 0, 100, 70)
   if mbusyc then state.mel_busyness = mbusyv; state.mel_live_events=nil end
