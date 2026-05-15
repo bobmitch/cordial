@@ -25,6 +25,7 @@ local CORE_MODULES = {
   "chord",
   "arp",
   "voicing",
+  "bass",
 }
 
 local function read_file(path)

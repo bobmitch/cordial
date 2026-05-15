@@ -67,8 +67,8 @@ output for a fixed seed + parameter set against the previous build.
 | 2e | `core/arp.lua` | ✅ shipped | `build_arp_pool`, `apply_arp_pattern` (16 patterns). Stateful `build_arp_events` and `resolve_step_prob` to land in 2i. |
 | 2f | `core/voicing.lua` | ✅ shipped | 12 pure helpers: `scale_pc_set`, `pentatonic_pcs_for`, `chord_pc_set`, `is_chord_tone`, `is_scale_tone`, `chord_scale_pc_set`, `pcs_to_notes_in_range`, `nearest_chord_tone`, `voice_lead_to_chord`, `diatonic_step`, `diatonic_neighbor`, `leading_tone_to` |
 | 2g | params convention + `core/chord.lua` adds `build_progression` | ✅ shipped | Params shape: flat table keyed by string. Host owns `state` and translates into params before calling. Smart voicing + slash bass + quality overrides all preserved. |
-| 2h | `core/bass.lua` | ⏳ next | Bass generator with params |
-| 2i | `core/arp.lua` gains `build_arp_events` | ⏳ | Arp generator with params |
+| 2h | `core/bass.lua` | ✅ shipped | 5 styles (Root / Root-Fifth / Walking / Boogie / Pattern) with params. Bass keeps its own RNG stream — host reseeds before calling. |
+| 2i | `core/arp.lua` gains `build_arp_events` | ⏳ next | Arp generator with params |
 | 2j | `core/melody.lua` | ⏳ (big) | Phrase arc + landing + colour + all `mel_strat_*` + `mel_fill_block` |
 | 2k | `core/init.lua` + `host_vst.lua` wiring | ⏳ | Public surface; plugin embeds modules via JUCE `BinaryData` and `package.preload` |
 

@@ -48,7 +48,7 @@ plugin/
 │       ├── chord.lua     # ✅ extracted (phase 2d)
 │       ├── arp.lua       # ✅ extracted (phase 2e)
 │       ├── voicing.lua   # ✅ extracted (phase 2f)
-│       ├── bass.lua      # 🚧 phase 2h
+│       ├── bass.lua      # ✅ extracted (phase 2h)
 │       └── melody.lua    # 🚧 phase 2j
 ├── scripts/
 │   ├── build-windows.ps1     # plugin build helper
