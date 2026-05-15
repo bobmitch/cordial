@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.22)
 
+# CMake 4.x removed support for `cmake_minimum_required(VERSION < 3.5)`.
+# Some transitive dependencies (notably walterschell/Lua) still declare an
+# older floor in their own CMakeLists, which makes configure fail outright
+# on modern CMake. This shim makes CMake treat any sub-project written
+# against >= 3.5 conventions as if it had declared 3.5. Harmless on older
+# CMake (variable is simply unread).
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+
 # ---------------------------------------------------------------------------
 # Cordial VST — Phase 1 scaffold
 #
