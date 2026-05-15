@@ -64,10 +64,13 @@ output for a fixed seed + parameter set against the previous build.
 | 2b | `core/progressions.lua` | ✅ shipped | The `PROGRESSIONS` catalog (171 presets) |
 | 2c | `core/rng.lua` | ✅ shipped | `rng_seed`, `rng_float`, `rng_int`, `derive_seed` |
 | 2d | `core/chord.lua` | ✅ shipped | `midi_note`, `degree_root_midi`, `build_chord`, `slash_bass_midi`, `chord_notes_in_range`, `nearest_idx`. Stateful `build_progression` stays in host until Phase 3 defines the params struct. |
-| 2e | `core/arp.lua` | ✅ shipped | `build_arp_pool`, `apply_arp_pattern` (16 patterns). Stateful `build_arp_events` and `resolve_step_prob` stay in host until Phase 3. |
-| 2f | `core/bass.lua` | ⏳ next | Bass generator |
-| 2g | `core/melody.lua` | ⏳ | Phrase arc, metric weight, voice leading, all `mel_*` generators, `MEL_GEN_FNS`. Biggest piece. |
-| 2h | `core/init.lua` + `host_vst.lua` wiring | ⏳ | Public surface; plugin embeds modules via JUCE `BinaryData` and `package.preload` |
+| 2e | `core/arp.lua` | ✅ shipped | `build_arp_pool`, `apply_arp_pattern` (16 patterns). Stateful `build_arp_events` and `resolve_step_prob` to land in 2i. |
+| 2f | `core/voicing.lua` | ✅ shipped | 12 pure helpers: `scale_pc_set`, `pentatonic_pcs_for`, `chord_pc_set`, `is_chord_tone`, `is_scale_tone`, `chord_scale_pc_set`, `pcs_to_notes_in_range`, `nearest_chord_tone`, `voice_lead_to_chord`, `diatonic_step`, `diatonic_neighbor`, `leading_tone_to` |
+| 2g | params convention + `core/chord.lua` adds `build_progression` | ⏳ next | Design the params-table shape. Lift `build_progression` to take params. |
+| 2h | `core/bass.lua` | ⏳ | Bass generator with params |
+| 2i | `core/arp.lua` gains `build_arp_events` | ⏳ | Arp generator with params |
+| 2j | `core/melody.lua` | ⏳ (big) | Phrase arc + landing + colour + all `mel_strat_*` + `mel_fill_block` |
+| 2k | `core/init.lua` + `host_vst.lua` wiring | ⏳ | Public surface; plugin embeds modules via JUCE `BinaryData` and `package.preload` |
 
 ## Verification per sub-commit
 

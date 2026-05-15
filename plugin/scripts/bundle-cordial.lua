@@ -24,6 +24,7 @@ local CORE_MODULES = {
   "rng",
   "chord",
   "arp",
+  "voicing",
 }
 
 local function read_file(path)
