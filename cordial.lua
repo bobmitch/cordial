@@ -354,6 +354,36 @@ M.PROGRESSIONS = {
 return M
 end)()
 
+-- ================================================================
+--  bundled from plugin/lua/core/rng.lua
+-- ================================================================
+local rng = (function()
+-- ----------------------------------------------------------------
+--  core/rng.lua  —  seeded random helpers
+--
+--  Thin wrappers over Lua's math.random so every generator in core/
+--  threads through a single deterministic stream. The seed contract
+--  for Cordial is non-negotiable: same seed + same params →
+--  identical output. Do not introduce bare math.random() calls in
+--  core/ that bypass these helpers.
+-- ----------------------------------------------------------------
+
+local M = {}
+
+function M.rng_seed(s) math.randomseed(s) end
+function M.rng_float() return math.random() end
+function M.rng_int(a, b) return math.random(a, b) end
+
+-- Derive an independent-but-deterministic seed from a base seed. Used to
+-- give a layer (e.g. bass) its own RNG stream that depends on the user's
+-- seed but doesn't share state with the chord/arp/melody stream.
+function M.derive_seed(base)
+  return (base * 1664525 + 1013904223) % 99991 + 1
+end
+
+return M
+end)()
+
 -- ============================================================
 --  cordial  –  REAPER chord / arp / melody generator
 --
@@ -403,6 +433,9 @@ local MODE_DISPLAY     = theory.MODE_DISPLAY
 local SCALE_INTERVALS  = theory.SCALE_INTERVALS
 local mode_idx_by_name = theory.mode_idx_by_name
 local PROGRESSIONS     = progressions.PROGRESSIONS
+local rng_seed         = rng.rng_seed
+local rng_float        = rng.rng_float
+local rng_int          = rng.rng_int
 
 
 -- (PROG_NAMES, QUALITY_LIST, QUALITY_DISPLAY replaced by grouped item tables below)
@@ -802,16 +835,13 @@ load_proj_state()
 reaper.atexit(save_proj_state)
 
 -- ----------------------------------------------------------------
---  SEEDED RNG
+--  SEEDED RNG (host orchestration)
+--  The pure RNG primitives live in core/rng.lua and are imported at
+--  the top of this file. This block only keeps the host-side wrapper
+--  that derives the bass stream's seed from `state.seed`.
 -- ----------------------------------------------------------------
-local function rng_seed(s) math.randomseed(s) end
-local function rng_float()  return math.random() end
-local function rng_int(a,b) return math.random(a,b) end
-
--- Isolated RNG stream for bass: derived from state.seed so same seed → same bass,
--- but independent of the arp/melody stream so neither can shift the other.
 local function bass_rng_reseed()
-  rng_seed((state.seed * 1664525 + 1013904223) % 99991 + 1)
+  rng_seed(rng.derive_seed(state.seed))
 end
 
 -- ----------------------------------------------------------------

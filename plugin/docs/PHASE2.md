@@ -62,8 +62,8 @@ output for a fixed seed + parameter set against the previous build.
 |---|---|---|---|
 | 2a | `core/theory.lua` | ✅ shipped | `NOTE_NAMES`, `CHORD_INTERVALS`, `MODE_*`, `SCALE_INTERVALS`, `mode_idx_by_name` |
 | 2b | `core/progressions.lua` | ✅ shipped | The `PROGRESSIONS` catalog (171 presets) |
-| 2c | `core/rng.lua` | ⏳ next | `rng_seed` and any seeded helpers |
-| 2d | `core/chord.lua` | ⏳ | `build_chord`, `build_progression`, voicing helpers |
+| 2c | `core/rng.lua` | ✅ shipped | `rng_seed`, `rng_float`, `rng_int`, `derive_seed` |
+| 2d | `core/chord.lua` | ⏳ next | `build_chord`, `build_progression`, voicing helpers |
 | 2e | `core/arp.lua` | ⏳ | `build_arp_pool`, `apply_arp_pattern`, `build_arp_events` |
 | 2f | `core/bass.lua` | ⏳ | Bass generator (lines ~3042-3192 in old `cordial.lua`) |
 | 2g | `core/melody.lua` | ⏳ | Phrase arc, metric weight, voice leading, all `mel_*` generators, `MEL_GEN_FNS`. Biggest piece. |

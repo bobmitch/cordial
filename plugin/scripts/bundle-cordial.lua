@@ -21,6 +21,7 @@
 local CORE_MODULES = {
   "theory",
   "progressions",
+  "rng",
 }
 
 local function read_file(path)
