@@ -62,9 +62,14 @@ reduction.
 
 ## Phases
 
-### 1. Scaffold
+### 1. Scaffold *(scaffolded — see [`plugin/`](plugin/))*
 CMake JUCE project, sol2 + Lua 5.4 vendored via CPM, "Hello plugin" that emits
 a hardcoded C-major chord on bar 1. Verify it loads in Reaper, Ableton, Logic.
+
+> Code: [`plugin/source/`](plugin/source/) · Build: [`plugin/CMakeLists.txt`](plugin/CMakeLists.txt) ·
+> Phase notes: [`plugin/docs/PHASE1.md`](plugin/docs/PHASE1.md) ·
+> Tooling: [`plugin/docs/TOOLS.md`](plugin/docs/TOOLS.md) ·
+> Layout & invariants: [`plugin/docs/ARCHITECTURE.md`](plugin/docs/ARCHITECTURE.md)
 
 ### 2. Carve the boundary
 Split `cordial.lua` into:
