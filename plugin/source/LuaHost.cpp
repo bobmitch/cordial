@@ -53,8 +53,17 @@ std::optional<LuaHost::Chord> LuaHost::getPhase1Chord()
     sol::table t = res;
     Chord out;
     sol::table notes = t["notes"];
-    for (auto& kv : notes)
-        out.notes.push_back(kv.second.as<int>());
+    // ipairs-style iteration: range-based for on sol::table uses pairs()
+    // semantics, which is not guaranteed to enumerate the array part of a
+    // Lua sequence in sol2 v3. Walking integer indices until the first
+    // missing slot is the canonical idiom for {a, b, c}-style tables.
+    for (std::size_t i = 1; ; ++i)
+    {
+        sol::optional<int> v = notes[i];
+        if (! v)
+            break;
+        out.notes.push_back (*v);
+    }
     out.velocity    = t.get_or("velocity", 100);
     out.lengthBeats = t.get_or("length_beats", 4.0);
     return out;

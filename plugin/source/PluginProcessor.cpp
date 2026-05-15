@@ -14,14 +14,21 @@ CordialAudioProcessor::CordialAudioProcessor()
         chordNotes       = chord->notes;
         chordVelocity    = chord->velocity;
         chordLengthBeats = chord->lengthBeats;
-        luaDiagnostic    = "Lua OK: " + luaHost.ping();
+        luaDiagnostic    = "Lua OK (" + juce::String ((int) chordNotes.size())
+                         + " notes): " + luaHost.ping();
     }
     else
     {
-        // Fallback so the plugin still loads (and is audibly broken) if the
-        // Lua side fails — easier to diagnose than silent failure.
-        chordNotes    = { 60, 64, 67 };
         luaDiagnostic = "Lua FAILED — using C++ fallback chord";
+    }
+
+    // Safety net: if Lua returned an empty notes array, fall back to a
+    // hardcoded triad so the plugin is at least audibly broken in a
+    // diagnosable way instead of silently emitting nothing.
+    if (chordNotes.empty())
+    {
+        chordNotes    = { 60, 64, 67 };
+        luaDiagnostic = luaDiagnostic + "  [empty notes → using C++ fallback]";
     }
 }
 
