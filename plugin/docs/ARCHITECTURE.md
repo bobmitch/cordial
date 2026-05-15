@@ -34,18 +34,46 @@ plugin/
 │       # through a typed C++ method here. Keeps the C++ ↔ Lua boundary
 │       # in exactly one place, which is what Phase 3 expands.
 ├── lua/                  # Lua, embedded as binary data into the plugin
-│   ├── host_vst.lua      # phase 1 stub. Phase 2+: the thin host adapter
-│   │                     # that wraps core/ for the C++ shim.
-│   └── core/             # (phase 2) host-agnostic music engine — carved
-│                         # straight out of cordial.lua. PROGRESSIONS,
-│                         # build_progression, MEL_GEN_FNS, phrase-arc
-│                         # helpers, RNG, etc.
-├── scripts/              # build helpers (no source code lives here)
+│   ├── host_vst.lua      # phase 1 stub. Phase 2 wires it to require core/.
+│   ├── host_reaper.lua   # REAPER glue: UI, MIDI item writer, live preview,
+│   │                     # project persistence. Source of truth — every edit
+│   │                     # to the REAPER product happens here, NOT in the
+│   │                     # generated repo-root cordial.lua.
+│   └── core/             # host-agnostic music engine, carved out of the
+│                         # original cordial.lua during phase 2. Each file
+│                         # is a Lua module (`local M = {}; ... return M`).
+│       ├── theory.lua    # ✅ extracted (phase 2a)
+│       ├── progressions.lua  # 🚧 phase 2b
+│       ├── rng.lua       # 🚧 phase 2c
+│       ├── chord.lua     # 🚧 phase 2d
+│       ├── arp.lua       # 🚧 phase 2e
+│       └── melody.lua    # 🚧 phase 2f
+├── scripts/
+│   ├── build-windows.ps1     # plugin build helper
+│   └── bundle-cordial.lua    # regenerates repo-root cordial.lua from
+│                             # core/*.lua + host_reaper.lua. Each core
+│                             # module is wrapped in an IIFE so its
+│                             # `return M` lands in a top-level local;
+│                             # host_reaper.lua aliases the exports back
+│                             # to bare locals so the REAPER code reads
+│                             # unchanged.
 └── docs/                 # phase notes — start here when picking work up
     ├── TOOLS.md          # install guide
     ├── PHASE1.md         # what shipped in phase 1
+    ├── PHASE2.md         # carve plan + per-module status
     └── ARCHITECTURE.md   # this file
 ```
+
+The repo-root `cordial.lua` is **auto-generated**. To change REAPER
+behaviour, edit `plugin/lua/host_reaper.lua` (or the relevant
+`plugin/lua/core/*.lua`) and re-run the bundler:
+
+```bash
+lua plugin/scripts/bundle-cordial.lua
+```
+
+The bundler stamps a "DO NOT EDIT BY HAND" header on `cordial.lua` so
+the constraint is obvious to anyone (human or agent) opening it.
 
 ## Where Phase N adds code
 
