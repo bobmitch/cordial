@@ -45,7 +45,7 @@ plugin/
 │       ├── theory.lua    # ✅ extracted (phase 2a)
 │       ├── progressions.lua  # ✅ extracted (phase 2b)
 │       ├── rng.lua       # ✅ extracted (phase 2c)
-│       ├── chord.lua     # 🚧 phase 2d
+│       ├── chord.lua     # ✅ extracted (phase 2d)
 │       ├── arp.lua       # 🚧 phase 2e
 │       └── melody.lua    # 🚧 phase 2f
 ├── scripts/

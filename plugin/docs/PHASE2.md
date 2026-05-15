@@ -63,8 +63,8 @@ output for a fixed seed + parameter set against the previous build.
 | 2a | `core/theory.lua` | ✅ shipped | `NOTE_NAMES`, `CHORD_INTERVALS`, `MODE_*`, `SCALE_INTERVALS`, `mode_idx_by_name` |
 | 2b | `core/progressions.lua` | ✅ shipped | The `PROGRESSIONS` catalog (171 presets) |
 | 2c | `core/rng.lua` | ✅ shipped | `rng_seed`, `rng_float`, `rng_int`, `derive_seed` |
-| 2d | `core/chord.lua` | ⏳ next | `build_chord`, `build_progression`, voicing helpers |
-| 2e | `core/arp.lua` | ⏳ | `build_arp_pool`, `apply_arp_pattern`, `build_arp_events` |
+| 2d | `core/chord.lua` | ✅ shipped | `midi_note`, `degree_root_midi`, `build_chord`, `slash_bass_midi`, `chord_notes_in_range`, `nearest_idx`. Stateful `build_progression` stays in host until Phase 3 defines the params struct. |
+| 2e | `core/arp.lua` | ⏳ next | `build_arp_pool`, `apply_arp_pattern`, `build_arp_events` |
 | 2f | `core/bass.lua` | ⏳ | Bass generator (lines ~3042-3192 in old `cordial.lua`) |
 | 2g | `core/melody.lua` | ⏳ | Phrase arc, metric weight, voice leading, all `mel_*` generators, `MEL_GEN_FNS`. Biggest piece. |
 | 2h | `core/init.lua` + `host_vst.lua` wiring | ⏳ | Public surface; plugin embeds modules via JUCE `BinaryData` and `package.preload` |
