@@ -2243,86 +2243,29 @@ local function build_melody_events(progression)
   return events, abs_end
 end
 
--- (build_arp_pool, apply_arp_pattern moved to core/arp.lua)
-
-local BEAT_TOL = 0.001
-local function resolve_step_prob(abs_beat_pos)
-  local num        = state.timesig_num
-  local bar_phase  = abs_beat_pos % num
-  if bar_phase < BEAT_TOL or (num - bar_phase) < BEAT_TOL then
-    return state.arp_beat1_prob / 100.0
-  end
-  local grid_beats = ACCENT_GRID[state.arp_beatn_idx].beats
-  local grid_phase = abs_beat_pos % grid_beats
-  if grid_phase < BEAT_TOL or (grid_beats - grid_phase) < BEAT_TOL then
-    return state.arp_beatn_prob / 100.0
-  end
-  return state.arp_note_prob / 100.0
-end
-
+-- ----------------------------------------------------------------
+--  ARP — host wrapper around core/arp.lua
+--  (build_arp_pool, apply_arp_pattern, build_events all live in core)
+-- ----------------------------------------------------------------
 local function build_arp_events(chord_notes, chord_dur_beats, chord_abs_beat,
                                 chord_root_midi)
-  local rate_beats = ARP_RATES[state.arp_rate_idx].beats
-  local pattern    = ARP_PATTERNS[state.arp_pattern_idx]
-  local gate_frac  = state.arp_gate / 100.0
-  local base_vel   = state.arp_velocity
-  local human      = state.arp_vel_human
-  local chord_scale_pcs = chord_scale_pc_set(chord_notes, chord_root_midi)
-  local pool = build_arp_pool(chord_notes, state.arp_oct_low, state.arp_oct_high,
-                              state.arp_rigidity, chord_scale_pcs)
-  if #pool == 0 then return {} end
-  local n_steps = math.ceil(chord_dur_beats / rate_beats)
-  local rng_seq = {}
-  for i = 1, #pool + n_steps * 2 do rng_seq[i] = rng_float() end
-  local seq = apply_arp_pattern(pool, pattern, rng_seq)
-  if #seq == 0 then return {} end
-  local events = {}
-  if pattern == "Chord" then
-    local chord_voiced = {}
-    local pcs = {}
-    for _, p in ipairs(chord_notes) do pcs[#pcs+1] = p % 12 end
-    for oct = state.arp_oct_low, state.arp_oct_high do
-      for _, pc in ipairs(pcs) do
-        local pitch = oct * 12 + pc
-        if pitch >= 0 and pitch <= 127 then chord_voiced[#chord_voiced+1] = pitch end
-      end
-    end
-    table.sort(chord_voiced)
-    local pos      = 0
-    local step_idx = #chord_voiced + 1
-    while #rng_seq < step_idx + n_steps * 2 do rng_seq[#rng_seq+1] = rng_float() end
-    while pos < chord_dur_beats - 0.001 do
-      local actual_dur = math.min(rate_beats * gate_frac, chord_dur_beats - pos)
-      local prob = resolve_step_prob(chord_abs_beat + pos)
-      if rng_seq[step_idx] <= prob then
-        local vel_offset = math.floor((rng_seq[step_idx+1] * 2 - 1) * human)
-        local vel = math.max(1, math.min(127, base_vel + vel_offset))
-        for _, p in ipairs(chord_voiced) do
-          events[#events+1] = {pitch=p, pos=pos, dur=actual_dur, vel=vel}
-        end
-      end
-      pos = pos + rate_beats; step_idx = step_idx + 2
-    end
-  else
-    local pos = 0; local seq_pos = 1
-    local rng_offset = #pool + 1; local step_num = 0
-    while pos < chord_dur_beats - 0.001 do
-      local actual_dur   = math.min(rate_beats * gate_frac, chord_dur_beats - pos)
-      local rng_idx_prob = rng_offset + step_num * 2
-      local rng_idx_vel  = rng_idx_prob + 1
-      while #rng_seq < rng_idx_vel do rng_seq[#rng_seq+1] = rng_float() end
-      local prob = resolve_step_prob(chord_abs_beat + pos)
-      if rng_seq[rng_idx_prob] <= prob then
-        local vel_offset = math.floor((rng_seq[rng_idx_vel] * 2 - 1) * human)
-        local vel = math.max(1, math.min(127, base_vel + vel_offset))
-        events[#events+1] = {pitch=seq[seq_pos], pos=pos, dur=actual_dur, vel=vel}
-      end
-      pos = pos + rate_beats
-      seq_pos = (seq_pos % #seq) + 1
-      step_num = step_num + 1
-    end
-  end
-  return events
+  return arp.build_events(chord_notes, chord_dur_beats, chord_abs_beat,
+                          chord_root_midi, {
+    rate_beats        = ARP_RATES[state.arp_rate_idx].beats,
+    pattern           = ARP_PATTERNS[state.arp_pattern_idx],
+    gate              = state.arp_gate,
+    velocity          = state.arp_velocity,
+    vel_human         = state.arp_vel_human,
+    oct_low           = state.arp_oct_low,
+    oct_high          = state.arp_oct_high,
+    rigidity          = state.arp_rigidity,
+    chord_scale_pcs   = chord_scale_pc_set(chord_notes, chord_root_midi),
+    timesig_num       = state.timesig_num,
+    accent_grid_beats = ACCENT_GRID[state.arp_beatn_idx].beats,
+    beat1_prob        = state.arp_beat1_prob,
+    beatn_prob        = state.arp_beatn_prob,
+    note_prob         = state.arp_note_prob,
+  })
 end
 
 -- ----------------------------------------------------------------

@@ -18,6 +18,8 @@ local rng = rng or require 'core.rng'
 
 local M = {}
 
+local BEAT_TOL = 0.001
+
 -- Build the pool of pitches the arp draws from. Chord tones are always
 -- included; non-chord scale tones are added with probability
 -- `rigidity_pct/100` (so rigidity=100 → chord tones only).
@@ -197,6 +199,102 @@ function M.apply_arp_pattern(pool, pattern_name, rng_seq)
     return r
   end
   return pool
+end
+
+-- Step-trigger probability at an absolute beat position. Beat 1 of the bar
+-- gets `beat1_prob`; aligned grid beats get `beatn_prob`; everything else
+-- gets `note_prob`. All probabilities are 0..100 ints.
+local function resolve_step_prob(abs_beat_pos, p)
+  local bar_phase  = abs_beat_pos % p.timesig_num
+  if bar_phase < BEAT_TOL or (p.timesig_num - bar_phase) < BEAT_TOL then
+    return p.beat1_prob / 100.0
+  end
+  local grid_phase = abs_beat_pos % p.accent_grid_beats
+  if grid_phase < BEAT_TOL or (p.accent_grid_beats - grid_phase) < BEAT_TOL then
+    return p.beatn_prob / 100.0
+  end
+  return p.note_prob / 100.0
+end
+
+-- ----------------------------------------------------------------
+--  build_events(chord_notes, chord_dur_beats, chord_abs_beat, chord_root_midi, params)
+--    chord_notes      : array of MIDI pitches in the chord
+--    chord_dur_beats  : slot duration in beats
+--    chord_abs_beat   : absolute beat position of the slot's start (for accent grid)
+--    chord_root_midi  : root MIDI pitch (used by chord-aware scale pool)
+--    params:
+--      rate_beats         (number)   step rate in beats (e.g. 0.25 = 16th)
+--      pattern            (string)   "Up" | "Down" | ... | "Chord"
+--      gate               (int 0..100) note length as % of step
+--      velocity           (int)      base velocity
+--      vel_human          (int)      humanise ±N around base
+--      oct_low, oct_high  (int)      pitch pool octave range
+--      rigidity           (int 0..100) chance of adding non-chord scale tones
+--      chord_scale_pcs    (set)      pc set for the chord-aware scale
+--      timesig_num        (int)      beats per bar (for beat-1 detection)
+--      accent_grid_beats  (number)   accent grid step in beats
+--      beat1_prob         (int 0..100) trigger chance on beat 1
+--      beatn_prob         (int 0..100) trigger chance on grid-aligned beats
+--      note_prob          (int 0..100) trigger chance everywhere else
+-- ----------------------------------------------------------------
+function M.build_events(chord_notes, chord_dur_beats, chord_abs_beat,
+                        chord_root_midi, p)
+  local gate_frac = p.gate / 100.0
+  local pool = M.build_arp_pool(chord_notes, p.oct_low, p.oct_high,
+                                p.rigidity, p.chord_scale_pcs)
+  if #pool == 0 then return {} end
+  local n_steps = math.ceil(chord_dur_beats / p.rate_beats)
+  local rng_seq = {}
+  for i = 1, #pool + n_steps * 2 do rng_seq[i] = rng.rng_float() end
+  local seq = M.apply_arp_pattern(pool, p.pattern, rng_seq)
+  if #seq == 0 then return {} end
+  local events = {}
+  if p.pattern == "Chord" then
+    local chord_voiced = {}
+    local pcs = {}
+    for _, pi in ipairs(chord_notes) do pcs[#pcs+1] = pi % 12 end
+    for oct = p.oct_low, p.oct_high do
+      for _, pc in ipairs(pcs) do
+        local pitch = oct * 12 + pc
+        if pitch >= 0 and pitch <= 127 then chord_voiced[#chord_voiced+1] = pitch end
+      end
+    end
+    table.sort(chord_voiced)
+    local pos      = 0
+    local step_idx = #chord_voiced + 1
+    while #rng_seq < step_idx + n_steps * 2 do rng_seq[#rng_seq+1] = rng.rng_float() end
+    while pos < chord_dur_beats - 0.001 do
+      local actual_dur = math.min(p.rate_beats * gate_frac, chord_dur_beats - pos)
+      local prob = resolve_step_prob(chord_abs_beat + pos, p)
+      if rng_seq[step_idx] <= prob then
+        local vel_offset = math.floor((rng_seq[step_idx+1] * 2 - 1) * p.vel_human)
+        local vel = math.max(1, math.min(127, p.velocity + vel_offset))
+        for _, pi in ipairs(chord_voiced) do
+          events[#events+1] = {pitch=pi, pos=pos, dur=actual_dur, vel=vel}
+        end
+      end
+      pos = pos + p.rate_beats; step_idx = step_idx + 2
+    end
+  else
+    local pos = 0; local seq_pos = 1
+    local rng_offset = #pool + 1; local step_num = 0
+    while pos < chord_dur_beats - 0.001 do
+      local actual_dur   = math.min(p.rate_beats * gate_frac, chord_dur_beats - pos)
+      local rng_idx_prob = rng_offset + step_num * 2
+      local rng_idx_vel  = rng_idx_prob + 1
+      while #rng_seq < rng_idx_vel do rng_seq[#rng_seq+1] = rng.rng_float() end
+      local prob = resolve_step_prob(chord_abs_beat + pos, p)
+      if rng_seq[rng_idx_prob] <= prob then
+        local vel_offset = math.floor((rng_seq[rng_idx_vel] * 2 - 1) * p.vel_human)
+        local vel = math.max(1, math.min(127, p.velocity + vel_offset))
+        events[#events+1] = {pitch=seq[seq_pos], pos=pos, dur=actual_dur, vel=vel}
+      end
+      pos = pos + p.rate_beats
+      seq_pos = (seq_pos % #seq) + 1
+      step_num = step_num + 1
+    end
+  end
+  return events
 end
 
 return M
