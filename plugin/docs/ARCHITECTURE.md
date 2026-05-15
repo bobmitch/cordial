@@ -46,7 +46,7 @@ plugin/
 │       ├── progressions.lua  # ✅ extracted (phase 2b)
 │       ├── rng.lua       # ✅ extracted (phase 2c)
 │       ├── chord.lua     # ✅ extracted (phase 2d)
-│       ├── arp.lua       # 🚧 phase 2e
+│       ├── arp.lua       # ✅ extracted (phase 2e)
 │       └── melody.lua    # 🚧 phase 2f
 ├── scripts/
 │   ├── build-windows.ps1     # plugin build helper

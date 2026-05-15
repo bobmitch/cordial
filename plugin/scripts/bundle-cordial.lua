@@ -23,6 +23,7 @@ local CORE_MODULES = {
   "progressions",
   "rng",
   "chord",
+  "arp",
 }
 
 local function read_file(path)
