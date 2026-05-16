@@ -196,10 +196,9 @@ local state = {
   mel_busyness     = 45,         -- 0=sparse/long-held, 100=dense/clustered bursts
   mel_space        = 0,          -- 0=fill the bar, 100=lots of rests, onsets pinned to quarters
   mel_cadence      = 60,         -- 0=free wander, 100=textbook cadences w/ phrase grammar
-  -- Internal: derived from mel_cadence each generation pass via
-  -- apply_cadence_to_legacy(). Not user-facing; readers across
-  -- mel_fill_block / build_onset_candidates / pick_dur_slots /
-  -- maybe_insert_colour consume them as locals.
+  -- mel_cadence drives the chord-tone landing rule and the surface-walker
+  -- approach figures inside core/melody.lua. mel_colour drives the
+  -- chromatic passing-tone insertion in the same module.
   mel_colour       = 0,
   mel_metre        = 50,
   -- Rhythmic rigidity: bias each note's duration to match the onset's grid
