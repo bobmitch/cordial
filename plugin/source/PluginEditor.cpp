@@ -41,6 +41,11 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     rootLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (rootLabel);
     addAndMakeVisible (rootCombo);
+    {
+        juce::StringArray items;
+        for (const auto* n : Params::NOTE_NAMES) items.add (n);
+        rootCombo.addItemList (items, 1);
+    }
     rootAttachment = std::make_unique<ComboAttachment> (apvts, Params::Root, rootCombo);
 
     octaveLabel.setJustificationType (juce::Justification::centredRight);
@@ -52,6 +57,13 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     presetLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (presetLabel);
     addAndMakeVisible (presetCombo);
+    {
+        juce::StringArray items;
+        for (const auto& pi : processor.getPresetInfos())
+            items.add (pi.name.isEmpty() ? "Preset" : pi.name);
+        if (items.isEmpty()) items.add ("Default");
+        presetCombo.addItemList (items, 1);
+    }
     presetAttachment = std::make_unique<ComboAttachment> (apvts, Params::Preset, presetCombo);
 
     seedLabel.setJustificationType (juce::Justification::centredRight);
@@ -85,12 +97,22 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     arpPatternLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (arpPatternLabel);
     addAndMakeVisible (arpPatternCombo);
+    {
+        juce::StringArray items;
+        for (const auto* s : Params::ARP_PATTERNS) items.add (s);
+        arpPatternCombo.addItemList (items, 1);
+    }
     arpPatternAttachment = std::make_unique<ComboAttachment> (
         apvts, Params::ArpPattern, arpPatternCombo);
 
     arpRateLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (arpRateLabel);
     addAndMakeVisible (arpRateCombo);
+    {
+        juce::StringArray items;
+        for (const auto* s : Params::ARP_RATES) items.add (s);
+        arpRateCombo.addItemList (items, 1);
+    }
     arpRateAttachment = std::make_unique<ComboAttachment> (
         apvts, Params::ArpRate, arpRateCombo);
 
@@ -120,6 +142,11 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     melPresetLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (melPresetLabel);
     addAndMakeVisible (melPresetCombo);
+    {
+        juce::StringArray items;
+        for (const auto* s : Params::MEL_PRESETS) items.add (s);
+        melPresetCombo.addItemList (items, 1);
+    }
     melPresetAttachment = std::make_unique<ComboAttachment> (
         apvts, Params::MelPreset, melPresetCombo);
 
