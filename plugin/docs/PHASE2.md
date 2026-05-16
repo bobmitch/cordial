@@ -69,8 +69,8 @@ output for a fixed seed + parameter set against the previous build.
 | 2g | params convention + `core/chord.lua` adds `build_progression` | ✅ shipped | Params shape: flat table keyed by string. Host owns `state` and translates into params before calling. Smart voicing + slash bass + quality overrides all preserved. |
 | 2h | `core/bass.lua` | ✅ shipped | 5 styles (Root / Root-Fifth / Walking / Boogie / Pattern) with params. Bass keeps its own RNG stream — host reseeds before calling. |
 | 2i | `core/arp.lua` gains `build_arp_events` | ✅ shipped | Full arp event builder with params, including the inlined `resolve_step_prob` helper for accent-grid probabilities. Verified Up + Chord + all-prob-zero. |
-| 2j | `core/melody.lua` | ⏳ next (big) | Phrase arc + landing + colour + all `mel_strat_*` + `mel_fill_block` |
-| 2k | `core/init.lua` + `host_vst.lua` wiring | ⏳ | Public surface; plugin embeds modules via JUCE `BinaryData` and `package.preload` |
+| 2j | `core/melody.lua` | ✅ shipped | Full melody pipeline (phrase arc + tension/density + landing rule + metric weight + grid quantisation + phrase planner + skeleton + surface walker + colour tones + all 8 `mel_strat_*` + `mel_fill_block` + `MEL_GEN_FNS` + cycle/event entry points). Module-local `p` upvalue avoids threading params through every signature; host wrapper translates state. Smoke-tested with all 8 presets — distinct event counts, deterministic per seed. |
+| 2k | `core/init.lua` + `host_vst.lua` wiring | ⏳ next | Public surface; plugin embeds modules via JUCE `BinaryData` and `package.preload` |
 
 ## Verification per sub-commit
 

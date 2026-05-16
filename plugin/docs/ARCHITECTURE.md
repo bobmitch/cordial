@@ -49,7 +49,7 @@ plugin/
 │       ├── arp.lua       # ✅ extracted (phase 2e)
 │       ├── voicing.lua   # ✅ extracted (phase 2f)
 │       ├── bass.lua      # ✅ extracted (phase 2h)
-│       └── melody.lua    # 🚧 phase 2j
+│       └── melody.lua    # ✅ extracted (phase 2j)
 ├── scripts/
 │   ├── build-windows.ps1     # plugin build helper
 │   └── bundle-cordial.lua    # regenerates repo-root cordial.lua from
