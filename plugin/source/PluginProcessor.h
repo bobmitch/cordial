@@ -5,16 +5,18 @@
 #include "LuaHost.h"
 
 // ---------------------------------------------------------------------------
-// CordialAudioProcessor — phase 1 scaffold.
+// CordialAudioProcessor — phase 3: full chord-progression generation.
 //
-// MIDI-effect plugin. The audio thread runs no Lua and allocates nothing in
-// `processBlock`; the cached chord notes are fetched from Lua during
-// construction (and on resume) and copied into a small POD vector that
-// `processBlock` reads.
+// The LuaHost calls host_vst.lua's generate() once at construction (and
+// will be called again in Phase 5 when parameters change). The resulting
+// MidiEvent list is stored in beats; processBlock converts to sample offsets
+// using the live BPM from the host playhead.
 //
-// Behaviour: when the host transport starts, the next time playback crosses
-// the bar-1 boundary (ppq 0) we emit C-E-G (sourced from host_vst.lua). On
-// the bar-2 boundary we emit the matching note-offs. Stop + restart re-arms.
+// processBlock realtime contract:
+//   - Allocates nothing on the heap (note: activeNotes can grow; fixed in Phase 4)
+//   - Calls no Lua
+//   - Takes no locks
+//   - Never blocks
 // ---------------------------------------------------------------------------
 class CordialAudioProcessor : public juce::AudioProcessor
 {
@@ -33,8 +35,6 @@ public:
     const juce::String getName() const override         { return "Cordial"; }
     bool acceptsMidi()  const override                  { return true; }
     bool producesMidi() const override                  { return true; }
-    // Reported as a normal Fx (not a pure MIDI effect) so REAPER's audio
-    // chain isn't broken when Cordial is inserted before a synth.
     bool isMidiEffect() const override                  { return false; }
     double getTailLengthSeconds() const override        { return 0.0; }
 
@@ -47,19 +47,27 @@ public:
     void getStateInformation (juce::MemoryBlock&) override {}
     void setStateInformation (const void*, int) override   {}
 
-    // Exposed for the editor's diagnostic readout.
     juce::String getLuaDiagnostic() const { return luaDiagnostic; }
 
 private:
     LuaHost luaHost;
-    std::vector<int> chordNotes;     // populated once from Lua, then read-only
-    int              chordVelocity { 100 };
-    double           chordLengthBeats { 4.0 };
 
-    bool wasPlaying     { false };
-    bool armed          { true };    // re-armed on transport stop
-    bool chordOn        { false };
-    int  samplesUntilOff { 0 };      // > 0 while the chord is sounding
+    // Pre-generated event list (beats). Populated at construction from Lua;
+    // will be regenerated in Phase 5 when parameters change.
+    std::vector<LuaHost::MidiEvent> midiEvents;
+
+    // Per-playback state — reset on every transport start.
+    int     eventCursor       { 0 };
+    int64_t samplesSinceStart { 0 };
+    double  cachedBpm         { 120.0 };
+
+    // Active (sounding) notes waiting for their note-off.
+    // Note: std::vector may allocate; a lock-free ring replaces this in Phase 4.
+    struct ActiveNote { int note, channel; int64_t noteOffSample; };
+    std::vector<ActiveNote> activeNotes;
+
+    bool wasPlaying { false };
+    bool armed      { true };
 
     juce::String luaDiagnostic;
 };

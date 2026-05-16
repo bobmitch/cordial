@@ -3,7 +3,7 @@
 CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor& p)
     : AudioProcessorEditor (&p), processor (p)
 {
-    heading.setText ("Cordial — Phase 1 scaffold", juce::dontSendNotification);
+    heading.setText ("Cordial", juce::dontSendNotification);
     heading.setFont (juce::Font (juce::FontOptions (20.0f, juce::Font::bold)));
     heading.setJustificationType (juce::Justification::centred);
     addAndMakeVisible (heading);

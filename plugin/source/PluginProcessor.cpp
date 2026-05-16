@@ -1,51 +1,33 @@
 #include "PluginProcessor.h"
 #include "PluginEditor.h"
 
-namespace
-{
-    constexpr int kChannel = 1;
-}
-
 CordialAudioProcessor::CordialAudioProcessor()
     : AudioProcessor(BusesProperties()
                        .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                        .withOutput ("Output", juce::AudioChannelSet::stereo(), true))
 {
-    if (auto chord = luaHost.getPhase1Chord())
-    {
-        chordNotes       = chord->notes;
-        chordVelocity    = chord->velocity;
-        chordLengthBeats = chord->lengthBeats;
-        luaDiagnostic    = "Lua OK (" + juce::String ((int) chordNotes.size())
-                         + " notes): " + luaHost.ping();
-    }
-    else
-    {
-        luaDiagnostic = "Lua FAILED — using C++ fallback chord";
-    }
+    // Generate the default I-IV-V-I progression in C major at construction.
+    // Phase 5 will regenerate when the user changes parameters via the UI.
+    LuaHost::Params p;
+    midiEvents = luaHost.generate(p);
 
-    // Safety net: if Lua returned an empty notes array, fall back to a
-    // hardcoded triad so the plugin is at least audibly broken in a
-    // diagnosable way instead of silently emitting nothing.
-    if (chordNotes.empty())
-    {
-        chordNotes    = { 60, 64, 67 };
-        luaDiagnostic = luaDiagnostic + "  [empty notes → using C++ fallback]";
-    }
+    luaDiagnostic = midiEvents.empty()
+        ? "Lua FAILED — no events generated"
+        : "Lua OK (" + juce::String ((int) midiEvents.size())
+          + " events): " + luaHost.ping();
 }
 
 void CordialAudioProcessor::prepareToPlay (double, int)
 {
-    wasPlaying = false;
-    armed      = true;
-    chordOn    = false;
+    wasPlaying    = false;
+    armed         = true;
+    eventCursor   = 0;
+    samplesSinceStart = 0;
+    activeNotes.clear();
 }
 
 bool CordialAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 {
-    // Accept mono or stereo, but the main input and output channel sets must
-    // match — JUCE's default is permissive, this just makes the contract
-    // explicit and stops oddball hosts from probing N-channel configs.
     const auto& mainOut = layouts.getMainOutputChannelSet();
     if (mainOut != juce::AudioChannelSet::mono()
      && mainOut != juce::AudioChannelSet::stereo())
@@ -56,77 +38,96 @@ bool CordialAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
 void CordialAudioProcessor::processBlock (juce::AudioBuffer<float>& audio,
                                           juce::MidiBuffer& midi)
 {
-    // Audio passthrough: leave `audio` untouched so any signal arriving from
-    // upstream FX flows through unchanged. JUCE's in-place buffer semantics
-    // mean "do nothing" == "passthrough".
-    //
-    // MIDI: we keep incoming events too (so MIDI items / keyboard input on
-    // this track still reach downstream FX) and add our generated chord on
-    // top. The phase-1 chord fires once on transport start.
+    // Audio passthrough — leave `audio` untouched.
     juce::ignoreUnused (audio);
 
     auto* ph = getPlayHead();
     juce::AudioPlayHead::PositionInfo pos;
     bool gotPos = false;
     if (ph != nullptr)
-    {
         if (auto p = ph->getPosition())
-        {
-            pos    = *p;
-            gotPos = true;
-        }
-    }
+        { pos = *p; gotPos = true; }
 
-    const bool playing = gotPos && pos.getIsPlaying();
-    const double bpm   = gotPos ? pos.getBpm().orFallback (120.0) : 120.0;
-    const double sr    = getSampleRate() > 0.0 ? getSampleRate() : 44100.0;
-    const int   numSamples = audio.getNumSamples();
+    const bool playing    = gotPos && pos.getIsPlaying();
+    const double bpm      = gotPos ? pos.getBpm().orFallback (120.0) : 120.0;
+    const double sr       = getSampleRate() > 0.0 ? getSampleRate() : 44100.0;
+    const int numSamples  = audio.getNumSamples();
 
     const bool justStarted = playing && ! wasPlaying;
     const bool justStopped = ! playing && wasPlaying;
     wasPlaying = playing;
 
-    if (justStopped && chordOn)
+    // --- Transport stop: flush all sounding notes and re-arm. ---------------
+    if (justStopped)
     {
-        for (int n : chordNotes)
-            midi.addEvent (juce::MidiMessage::noteOff (kChannel, n), 0);
-        chordOn = false;
-        armed   = true;
+        for (const auto& an : activeNotes)
+            midi.addEvent (juce::MidiMessage::noteOff (an.channel, an.note), 0);
+        activeNotes.clear();
+        armed         = true;
+        eventCursor   = 0;
+        samplesSinceStart = 0;
         return;
     }
 
-    if (justStarted && armed && ! chordNotes.empty())
+    // --- Transport start: reset playback head. --------------------------------
+    if (justStarted && armed)
     {
-        for (int n : chordNotes)
-            midi.addEvent (juce::MidiMessage::noteOn (kChannel, n,
-                                                     (juce::uint8) chordVelocity), 0);
-        chordOn = true;
-        armed   = false;
-
-        // Length in samples. Re-evaluated each play so tempo edits between
-        // takes work without restarting the plugin.
-        const double secs    = (60.0 / juce::jmax (1.0, bpm)) * chordLengthBeats;
-        // Stash remaining samples in chordLengthBeats's sibling field via a
-        // local static would be ugly — we instead reuse `samplesUntilOff`
-        // tracked through `chordOn`. Compute and store on the processor.
-        samplesUntilOff = juce::roundToInt (secs * sr);
+        eventCursor       = 0;
+        samplesSinceStart = 0;
+        cachedBpm         = juce::jmax (1.0, bpm);
+        armed             = false;
     }
 
-    if (chordOn)
+    if (! playing)
+        return;
+
+    // --- Drain events that fall inside this buffer. --------------------------
+    //
+    // Timing is anchored to the moment transport started (samplesSinceStart).
+    // We use the BPM captured at that moment (cachedBpm) for consistency; a
+    // real-time tempo change will drift but is corrected at the next transport
+    // start. Phase 4+ will re-generate on tempo change via the worker thread.
+    const double samplesPerBeat = (sr * 60.0) / cachedBpm;
+    const int64_t bufStart      = samplesSinceStart;
+    const int64_t bufEnd        = bufStart + numSamples;
+
+    // Note-offs first (MIDI convention: off before on if same pitch, same buffer).
+    for (auto it = activeNotes.begin(); it != activeNotes.end();)
     {
-        if (samplesUntilOff <= numSamples)
+        if (it->noteOffSample < bufEnd)
         {
-            const int offset = juce::jmax (0, samplesUntilOff);
-            for (int n : chordNotes)
-                midi.addEvent (juce::MidiMessage::noteOff (kChannel, n), offset);
-            chordOn         = false;
-            samplesUntilOff = 0;
+            const int offset = static_cast<int> (
+                juce::jmax (int64_t{0}, it->noteOffSample - bufStart));
+            midi.addEvent (juce::MidiMessage::noteOff (it->channel, it->note), offset);
+            it = activeNotes.erase (it);
         }
         else
         {
-            samplesUntilOff -= numSamples;
+            ++it;
         }
     }
+
+    // Note-ons for events whose start falls in this buffer.
+    while (eventCursor < static_cast<int> (midiEvents.size()))
+    {
+        const auto& ev = midiEvents[static_cast<std::size_t> (eventCursor)];
+        const int64_t evSample = static_cast<int64_t> (ev.posBeats * samplesPerBeat);
+        if (evSample >= bufEnd) break;
+
+        const int offset = static_cast<int> (
+            juce::jmax (int64_t{0}, evSample - bufStart));
+        midi.addEvent (juce::MidiMessage::noteOn (ev.channel, ev.note,
+                                                  static_cast<juce::uint8> (ev.velocity)),
+                       offset);
+
+        const int64_t offSample = static_cast<int64_t> (
+            (ev.posBeats + ev.durBeats) * samplesPerBeat);
+        activeNotes.push_back ({ ev.note, ev.channel, offSample });
+
+        ++eventCursor;
+    }
+
+    samplesSinceStart += numSamples;
 }
 
 juce::AudioProcessorEditor* CordialAudioProcessor::createEditor()
@@ -134,7 +135,6 @@ juce::AudioProcessorEditor* CordialAudioProcessor::createEditor()
     return new CordialAudioProcessorEditor (*this);
 }
 
-// JUCE plugin factory entry point.
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new CordialAudioProcessor();

@@ -78,39 +78,55 @@ LuaHost::LuaHost()
     loaded     = true;
 }
 
-std::optional<LuaHost::Chord> LuaHost::getPhase1Chord()
+std::vector<LuaHost::MidiEvent> LuaHost::generate(const Params& params)
 {
-    if (! loaded)
-        return std::nullopt;
+    std::vector<MidiEvent> out;
+    if (! loaded) return out;
 
-    sol::protected_function fn = hostModule["phase1_chord"];
+    sol::protected_function fn = hostModule["generate"];
     if (! fn.valid())
-        return std::nullopt;
+    {
+        juce::Logger::writeToLog("Cordial: generate() not found in host_vst.lua");
+        return out;
+    }
 
-    sol::protected_function_result res = fn();
+    // Build the Lua params table. Field names mirror core.chord.build_progression
+    // so the Lua side can pass them straight through without renaming.
+    sol::table p = lua.create_table();
+    p["mode"]         = params.mode;
+    p["root_idx"]     = params.rootIdx;
+    p["octave"]       = params.octave;
+    p["timesig_num"]  = params.timesigNum;
+    p["smart_voicing"] = params.smartVoicing;
+
+    sol::table degs = lua.create_table();
+    for (std::size_t i = 0; i < params.degrees.size(); ++i)
+        degs[static_cast<int>(i + 1)] = params.degrees[i];
+    p["degrees"] = degs;
+
+    sol::protected_function_result res = fn(p);
     if (! res.valid())
     {
         sol::error err = res;
-        juce::Logger::writeToLog(juce::String("phase1_chord error: ") + err.what());
-        return std::nullopt;
+        juce::Logger::writeToLog("Cordial generate() error: " + juce::String(err.what()));
+        return out;
     }
 
-    sol::table t = res;
-    Chord out;
-    sol::table notes = t["notes"];
-    // ipairs-style iteration: range-based for on sol::table uses pairs()
-    // semantics, which is not guaranteed to enumerate the array part of a
-    // Lua sequence in sol2 v3. Walking integer indices until the first
-    // missing slot is the canonical idiom for {a, b, c}-style tables.
+    // Parse the returned sequence of {pos_beats, note, vel, dur_beats, channel}.
+    sol::table events = res;
     for (std::size_t i = 1; ; ++i)
     {
-        sol::optional<int> v = notes[i];
-        if (! v)
-            break;
-        out.notes.push_back (*v);
+        sol::optional<sol::table> ev = events[i];
+        if (! ev) break;
+
+        MidiEvent e;
+        e.posBeats  = ev->get_or("pos_beats",  0.0);
+        e.note      = ev->get_or("note",        60);
+        e.velocity  = ev->get_or("vel",        100);
+        e.durBeats  = ev->get_or("dur_beats",  4.0);
+        e.channel   = ev->get_or("channel",     1);
+        out.push_back(e);
     }
-    out.velocity    = t.get_or("velocity", 100);
-    out.lengthBeats = t.get_or("length_beats", 4.0);
     return out;
 }
 
