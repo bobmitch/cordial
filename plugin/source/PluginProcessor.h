@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <functional>
+#include <mutex>
 #include <vector>
 
 #include "EventQueue.h"
@@ -63,6 +64,10 @@ public:
     // that so the editor can access it safely on the message thread.
     const std::vector<LuaHost::PresetInfo>& getPresetInfos() const { return presetInfos; }
 
+    // Returns a copy of the last generated event list; safe to call on the
+    // message thread (e.g. to write a drag-out MIDI file).
+    std::vector<LuaHost::MidiEvent> getDragSnapshot() const;
+
 private:
     // --- APVTS parameter layout (built before worker starts) ----------------
     static juce::AudioProcessorValueTreeState::ParameterLayout
@@ -84,7 +89,8 @@ private:
         GeneratorWorker (LuaHost& host,
                          EventQueue& queue,
                          std::atomic<int>& eventCountOut,
-                         std::function<LuaHost::Params()> paramProvider);
+                         std::function<LuaHost::Params()> paramProvider,
+                         std::function<void(std::vector<LuaHost::MidiEvent>)> onGenerated);
 
         void run() override;
         void requestRegeneration();
@@ -96,6 +102,7 @@ private:
         EventQueue&                    queue;
         std::atomic<int>&              lastEventCount;
         std::function<LuaHost::Params()> paramProvider;
+        std::function<void(std::vector<LuaHost::MidiEvent>)> onGenerated;
     };
 
     // Member declaration order matters — luaHost must be first so the APVTS
@@ -108,6 +115,10 @@ private:
 
     juce::String     cachedPing;
     std::atomic<int> lastEventCount { 0 };
+
+    // Drag-snapshot: written by worker thread, read by message thread.
+    mutable std::mutex               snapshotMutex;
+    std::vector<LuaHost::MidiEvent>  generationSnapshot;
 
     // Audio-thread-only state.
     std::vector<LuaHost::MidiEvent> currentGeneration;

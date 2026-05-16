@@ -105,14 +105,16 @@ LuaHost::Params CordialAudioProcessor::makeParams() const
 // GeneratorWorker
 // ---------------------------------------------------------------------------
 CordialAudioProcessor::GeneratorWorker::GeneratorWorker (
-    LuaHost&                         host,
-    EventQueue&                      q,
-    std::atomic<int>&                countOut,
-    std::function<LuaHost::Params()> provider)
+    LuaHost&                                             host,
+    EventQueue&                                          q,
+    std::atomic<int>&                                    countOut,
+    std::function<LuaHost::Params()>                     provider,
+    std::function<void(std::vector<LuaHost::MidiEvent>)> generated)
     : juce::Thread ("CordialGenerator"),
       luaHost (host), queue (q),
       lastEventCount (countOut),
-      paramProvider (std::move (provider))
+      paramProvider (std::move (provider)),
+      onGenerated (std::move (generated))
 {
 }
 
@@ -137,6 +139,7 @@ void CordialAudioProcessor::GeneratorWorker::regenerate()
     if (! events.empty())
         queue.pushEvents (events.data(), static_cast<int> (events.size()));
     lastEventCount.store (static_cast<int> (events.size()), std::memory_order_release);
+    if (onGenerated) onGenerated (events);
 }
 
 // ---------------------------------------------------------------------------
@@ -160,7 +163,13 @@ CordialAudioProcessor::CordialAudioProcessor()
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       presetInfos (luaHost.getPresets()),
       apvts (*this, nullptr, "CordialState", buildParameterLayout (presetInfos)),
-      worker (luaHost, eventQueue, lastEventCount, [this] { return makeParams(); })
+      worker (luaHost, eventQueue, lastEventCount,
+              [this] { return makeParams(); },
+              [this] (std::vector<LuaHost::MidiEvent> evs)
+              {
+                  std::lock_guard<std::mutex> g (snapshotMutex);
+                  generationSnapshot = std::move (evs);
+              })
 {
     cachedPing = luaHost.ping();
     currentGeneration.reserve (EventQueue::kCapacity);
@@ -219,6 +228,12 @@ juce::String CordialAudioProcessor::getLuaDiagnostic() const
     const int n = lastEventCount.load (std::memory_order_acquire);
     if (n <= 0) return "Generating\xe2\x80\xa6";
     return "Lua OK (" + juce::String (n) + " events): " + cachedPing;
+}
+
+std::vector<LuaHost::MidiEvent> CordialAudioProcessor::getDragSnapshot() const
+{
+    std::lock_guard<std::mutex> g (snapshotMutex);
+    return generationSnapshot;
 }
 
 void CordialAudioProcessor::processBlock (juce::AudioBuffer<float>& audio,

@@ -30,6 +30,10 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     diagnostic.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (diagnostic);
 
+    dragHandle.getMidiFilePath = [this]() -> juce::String { return writeTempMidi(); };
+    dragHandle.setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+    addAndMakeVisible (dragHandle);
+
     // --- Global section ------------------------------------------------------
     globalGroup.setText ("Global");
     addAndMakeVisible (globalGroup);
@@ -134,10 +138,12 @@ void CordialAudioProcessorEditor::resized()
 {
     auto r = getLocalBounds().reduced (kMargin);
 
-    // --- Top bar: heading (left) + diagnostic (right) -----------------------
+    // --- Top bar: heading (left) + drag handle + diagnostic (right) ---------
     {
         auto bar = r.removeFromTop (30);
         heading.setBounds    (bar.removeFromLeft (120));
+        bar.removeFromLeft   (kGap);
+        dragHandle.setBounds (bar.removeFromLeft (80));
         diagnostic.setBounds (bar);
     }
     r.removeFromTop (kGap);
@@ -261,4 +267,40 @@ void CordialAudioProcessorEditor::timerCallback()
     const auto next = processor.getLuaDiagnostic();
     if (diagnostic.getText() != next)
         diagnostic.setText (next, juce::dontSendNotification);
+}
+
+juce::String CordialAudioProcessorEditor::writeTempMidi()
+{
+    const auto events = processor.getDragSnapshot();
+    if (events.empty()) return {};
+
+    constexpr int kPPQ = 480;
+
+    juce::MidiFile midiFile;
+    midiFile.setTicksPerQuarterNote (kPPQ);
+
+    juce::MidiMessageSequence seq;
+    // 120 BPM tempo marker (500 000 µs / beat) so the file plays back sensibly
+    // when opened standalone; the DAW re-tempo's it to the project on import.
+    seq.addEvent (juce::MidiMessage::tempoMetaEvent (500000), 0);
+
+    for (const auto& ev : events)
+    {
+        const auto onTick  = static_cast<int> (std::round (ev.posBeats * kPPQ));
+        const auto offTick = static_cast<int> (std::round ((ev.posBeats + ev.durBeats) * kPPQ));
+        seq.addEvent (juce::MidiMessage::noteOn  (ev.channel, ev.note,
+                                                  static_cast<juce::uint8> (ev.velocity)), onTick);
+        seq.addEvent (juce::MidiMessage::noteOff (ev.channel, ev.note,
+                                                  static_cast<juce::uint8> (0)), offTick);
+    }
+    seq.updateMatchedPairs();
+    midiFile.addTrack (seq);
+
+    const auto tempFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                              .getChildFile ("cordial_drag.mid");
+    juce::FileOutputStream fos (tempFile);
+    if (! fos.openedOk()) return {};
+    if (! midiFile.writeTo (fos)) return {};
+
+    return tempFile.getFullPathName();
 }
