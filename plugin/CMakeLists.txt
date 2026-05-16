@@ -1,5 +1,13 @@
 cmake_minimum_required(VERSION 3.22)
 
+# CMake 4.x removed support for `cmake_minimum_required(VERSION < 3.5)`.
+# Some transitive dependencies (notably walterschell/Lua) still declare an
+# older floor in their own CMakeLists, which makes configure fail outright
+# on modern CMake. This shim makes CMake treat any sub-project written
+# against >= 3.5 conventions as if it had declared 3.5. Harmless on older
+# CMake (variable is simply unread).
+set(CMAKE_POLICY_VERSION_MINIMUM 3.5 CACHE STRING "" FORCE)
+
 # ---------------------------------------------------------------------------
 # Cordial VST — Phase 1 scaffold
 #
@@ -68,7 +76,11 @@ juce_add_plugin(CordialVST
     PLUGIN_CODE             Cdvs
     FORMATS                 VST3 AU Standalone
     PRODUCT_NAME            "Cordial"
-    IS_MIDI_EFFECT          TRUE
+    # Intentionally NOT IS_MIDI_EFFECT: REAPER (and several other DAWs) handle
+    # zero-audio-bus VST3 plugins poorly — placing one in an FX chain silences
+    # everything downstream. Ship as a normal stereo Fx that happens to
+    # produce MIDI and passes audio through unchanged. The cost is one extra
+    # bus declaration; the win is "works in every host without surgery".
     NEEDS_MIDI_INPUT        TRUE
     NEEDS_MIDI_OUTPUT       TRUE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
@@ -81,6 +93,15 @@ juce_generate_juce_header(CordialVST)
 juce_add_binary_data(CordialVST_LuaData
     SOURCES
         lua/host_vst.lua
+        lua/core/init.lua
+        lua/core/theory.lua
+        lua/core/progressions.lua
+        lua/core/rng.lua
+        lua/core/chord.lua
+        lua/core/arp.lua
+        lua/core/voicing.lua
+        lua/core/bass.lua
+        lua/core/melody.lua
 )
 
 target_sources(CordialVST PRIVATE
@@ -90,6 +111,9 @@ target_sources(CordialVST PRIVATE
     source/PluginEditor.h
     source/LuaHost.cpp
     source/LuaHost.h
+    source/EventQueue.cpp
+    source/EventQueue.h
+    source/Parameters.h
 )
 
 target_compile_definitions(CordialVST PRIVATE

@@ -1,18 +1,187 @@
 #include "PluginEditor.h"
+#include "Parameters.h"
+
+namespace
+{
+    constexpr int kMargin    = 10;
+    constexpr int kRowH      = 26;
+    constexpr int kGap       = 5;
+    constexpr int kGroupPad  = 18;  // extra top indent inside a GroupComponent (for border+title)
+    constexpr int kInnerPad  = 6;   // left/right/bottom padding inside a group
+    constexpr int kLabelW    = 80;
+    constexpr int kComboW    = 190;
+    constexpr int kSliderW   = 170;
+    constexpr int kTbW       = 100; // ToggleButton width
+}
 
 CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor& p)
-    : AudioProcessorEditor (&p), processor (p)
+    : AudioProcessorEditor (&p),
+      processor (p),
+      apvts (p.getAPVTS())
 {
-    heading.setText ("Cordial — Phase 1 scaffold", juce::dontSendNotification);
+    // --- Top bar -------------------------------------------------------------
+    heading.setText ("Cordial", juce::dontSendNotification);
     heading.setFont (juce::Font (juce::FontOptions (20.0f, juce::Font::bold)));
-    heading.setJustificationType (juce::Justification::centred);
+    heading.setJustificationType (juce::Justification::centredLeft);
     addAndMakeVisible (heading);
 
     diagnostic.setText (processor.getLuaDiagnostic(), juce::dontSendNotification);
-    diagnostic.setJustificationType (juce::Justification::centred);
+    diagnostic.setFont (juce::Font (juce::FontOptions (11.0f)));
+    diagnostic.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (diagnostic);
 
-    setSize (480, 160);
+    dragHandle.getMidiFilePath = [this]() -> juce::String { return writeTempMidi(); };
+    dragHandle.setMouseCursor (juce::MouseCursor::DraggingHandCursor);
+    addAndMakeVisible (dragHandle);
+
+    // --- Global section ------------------------------------------------------
+    globalGroup.setText ("Global");
+    addAndMakeVisible (globalGroup);
+
+    rootLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (rootLabel);
+    addAndMakeVisible (rootCombo);
+    {
+        juce::StringArray items;
+        for (const auto* n : Params::NOTE_NAMES) items.add (n);
+        rootCombo.addItemList (items, 1);
+    }
+    rootAttachment = std::make_unique<ComboAttachment> (apvts, Params::Root, rootCombo);
+
+    presetLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (presetLabel);
+    addAndMakeVisible (presetCombo);
+    {
+        juce::StringArray items;
+        for (const auto& pi : processor.getPresetInfos())
+            items.add (pi.name.isEmpty() ? "Preset" : pi.name);
+        if (items.isEmpty()) items.add ("Default");
+        presetCombo.addItemList (items, 1);
+    }
+    presetAttachment = std::make_unique<ComboAttachment> (apvts, Params::Preset, presetCombo);
+
+    seedLabel.setJustificationType (juce::Justification::centredRight);
+    seedSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 50, kRowH);
+    addAndMakeVisible (seedLabel);
+    addAndMakeVisible (seedSlider);
+    seedAttachment = std::make_unique<SliderAttachment> (apvts, Params::Seed, seedSlider);
+
+    // --- Chord section -------------------------------------------------------
+    chordGroup.setText ("Chord");
+    addAndMakeVisible (chordGroup);
+
+    chordEnabledBtn.setButtonText ("Enabled");
+    addAndMakeVisible (chordEnabledBtn);
+    chordEnabledAttachment = std::make_unique<ButtonAttachment> (
+        apvts, Params::ChordEnabled, chordEnabledBtn);
+
+    svButton.setButtonText ("Smart voicing");
+    addAndMakeVisible (svButton);
+    svAttachment = std::make_unique<ButtonAttachment> (apvts, Params::SmartVoicing, svButton);
+
+    chordOctaveLabel.setJustificationType (juce::Justification::centredRight);
+    chordOctaveSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
+    addAndMakeVisible (chordOctaveLabel);
+    addAndMakeVisible (chordOctaveSlider);
+    chordOctaveAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::ChordOctave, chordOctaveSlider);
+
+    // --- Arp section ---------------------------------------------------------
+    arpGroup.setText ("Arp");
+    addAndMakeVisible (arpGroup);
+
+    arpEnabledBtn.setButtonText ("Enabled");
+    addAndMakeVisible (arpEnabledBtn);
+    arpEnabledAttachment = std::make_unique<ButtonAttachment> (
+        apvts, Params::ArpEnabled, arpEnabledBtn);
+
+    arpPatternLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (arpPatternLabel);
+    addAndMakeVisible (arpPatternCombo);
+    {
+        juce::StringArray items;
+        for (const auto* s : Params::ARP_PATTERNS) items.add (s);
+        arpPatternCombo.addItemList (items, 1);
+    }
+    arpPatternAttachment = std::make_unique<ComboAttachment> (
+        apvts, Params::ArpPattern, arpPatternCombo);
+
+    arpRateLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (arpRateLabel);
+    addAndMakeVisible (arpRateCombo);
+    {
+        juce::StringArray items;
+        for (const auto* s : Params::ARP_RATES) items.add (s);
+        arpRateCombo.addItemList (items, 1);
+    }
+    arpRateAttachment = std::make_unique<ComboAttachment> (
+        apvts, Params::ArpRate, arpRateCombo);
+
+    arpOctLowLabel.setJustificationType (juce::Justification::centredRight);
+    arpOctLowSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 28, kRowH);
+    addAndMakeVisible (arpOctLowLabel);
+    addAndMakeVisible (arpOctLowSlider);
+    arpOctLowAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::ArpOctaveLow, arpOctLowSlider);
+
+    arpOctHighLabel.setJustificationType (juce::Justification::centredRight);
+    arpOctHighSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 28, kRowH);
+    addAndMakeVisible (arpOctHighLabel);
+    addAndMakeVisible (arpOctHighSlider);
+    arpOctHighAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::ArpOctaveHigh, arpOctHighSlider);
+
+    arpRigidityLabel.setJustificationType (juce::Justification::centredRight);
+    arpRigiditySlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
+    addAndMakeVisible (arpRigidityLabel);
+    addAndMakeVisible (arpRigiditySlider);
+    arpRigidityAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::ArpRigidity, arpRigiditySlider);
+
+    // --- Melody section ------------------------------------------------------
+    melGroup.setText ("Melody");
+    addAndMakeVisible (melGroup);
+
+    melEnabledBtn.setButtonText ("Enabled");
+    addAndMakeVisible (melEnabledBtn);
+    melEnabledAttachment = std::make_unique<ButtonAttachment> (
+        apvts, Params::MelEnabled, melEnabledBtn);
+
+    melPresetLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (melPresetLabel);
+    addAndMakeVisible (melPresetCombo);
+    {
+        juce::StringArray items;
+        for (const auto* s : Params::MEL_PRESETS) items.add (s);
+        melPresetCombo.addItemList (items, 1);
+    }
+    melPresetAttachment = std::make_unique<ComboAttachment> (
+        apvts, Params::MelPreset, melPresetCombo);
+
+    melOctaveLabel.setJustificationType (juce::Justification::centredRight);
+    melOctaveSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
+    addAndMakeVisible (melOctaveLabel);
+    addAndMakeVisible (melOctaveSlider);
+    melOctaveAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::MelOctave, melOctaveSlider);
+
+    melBusynessLabel.setJustificationType (juce::Justification::centredRight);
+    melBusynessSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
+    addAndMakeVisible (melBusynessLabel);
+    addAndMakeVisible (melBusynessSlider);
+    melBusynessAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::MelBusyness, melBusynessSlider);
+
+    melCadenceLabel.setJustificationType (juce::Justification::centredRight);
+    melCadenceSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
+    addAndMakeVisible (melCadenceLabel);
+    addAndMakeVisible (melCadenceSlider);
+    melCadenceAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::MelCadence, melCadenceSlider);
+
+    startTimerHz (4);
+
+    setSize (720, 565);
 }
 
 void CordialAudioProcessorEditor::paint (juce::Graphics& g)
@@ -22,7 +191,208 @@ void CordialAudioProcessorEditor::paint (juce::Graphics& g)
 
 void CordialAudioProcessorEditor::resized()
 {
-    auto r = getLocalBounds().reduced (16);
-    heading.setBounds    (r.removeFromTop (40));
-    diagnostic.setBounds (r.removeFromTop (40));
+    auto r = getLocalBounds().reduced (kMargin);
+
+    // --- Top bar: heading (left) + drag handle + diagnostic (right) ---------
+    {
+        auto bar = r.removeFromTop (30);
+        heading.setBounds    (bar.removeFromLeft (120));
+        bar.removeFromLeft   (kGap);
+        dragHandle.setBounds (bar.removeFromLeft (80));
+        diagnostic.setBounds (bar);
+    }
+    r.removeFromTop (kGap);
+
+    // =========================================================================
+    // Global section  (2 rows: Root + Seed; Preset)
+    // =========================================================================
+    {
+        const int groupH = kGroupPad + kRowH + kGap + kRowH + kInnerPad;
+        auto outer = r.removeFromTop (groupH);
+        globalGroup.setBounds (outer);
+
+        auto inner = outer.reduced (kInnerPad).withTrimmedTop (kGroupPad - kInnerPad);
+
+        // Row 1: Root [combo]   Seed [slider]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            rootLabel.setBounds  (row.removeFromLeft (kLabelW));
+            rootCombo.setBounds  (row.removeFromLeft (kComboW));
+            row.removeFromLeft   (kGap * 4);
+            seedLabel.setBounds  (row.removeFromLeft (kLabelW));
+            seedSlider.setBounds (row);
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 2: Preset [combo, full width]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            presetLabel.setBounds (row.removeFromLeft (kLabelW));
+            presetCombo.setBounds (row);
+        }
+    }
+    r.removeFromTop (kGap);
+
+    // =========================================================================
+    // Chord section  (2 rows: Enabled + Smart Voicing toggle; Octave [slider])
+    // =========================================================================
+    {
+        const int groupH = kGroupPad + kRowH + kGap + kRowH + kInnerPad;
+        auto outer = r.removeFromTop (groupH);
+        chordGroup.setBounds (outer);
+
+        auto inner = outer.reduced (kInnerPad).withTrimmedTop (kGroupPad - kInnerPad);
+
+        // Row 1: Enabled + Smart Voicing
+        {
+            auto row = inner.removeFromTop (kRowH);
+            chordEnabledBtn.setBounds (row.removeFromLeft (kTbW));
+            row.removeFromLeft (kGap * 4);
+            svButton.setBounds (row.removeFromLeft (kTbW + 30));
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 2: Octave [slider]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            chordOctaveLabel.setBounds  (row.removeFromLeft (kLabelW));
+            chordOctaveSlider.setBounds (row);
+        }
+    }
+    r.removeFromTop (kGap);
+
+    // =========================================================================
+    // Arp section  (4 rows: enabled; pattern + rate; oct low + oct high; rigidity)
+    // =========================================================================
+    {
+        const int groupH = kGroupPad + kRowH + kGap + kRowH + kGap + kRowH + kGap + kRowH + kInnerPad;
+        auto outer = r.removeFromTop (groupH);
+        arpGroup.setBounds (outer);
+
+        auto inner = outer.reduced (kInnerPad).withTrimmedTop (kGroupPad - kInnerPad);
+
+        // Row 1: Arp Enabled toggle
+        {
+            auto row = inner.removeFromTop (kRowH);
+            arpEnabledBtn.setBounds (row.removeFromLeft (kTbW));
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 2: Pattern [combo]   Rate [combo]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            arpPatternLabel.setBounds (row.removeFromLeft (kLabelW));
+            arpPatternCombo.setBounds (row.removeFromLeft (kComboW));
+            row.removeFromLeft (kGap * 4);
+            arpRateLabel.setBounds (row.removeFromLeft (kLabelW));
+            arpRateCombo.setBounds (row.removeFromLeft (kComboW));
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 3: Oct Low [slider]   Oct High [slider]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            arpOctLowLabel.setBounds  (row.removeFromLeft (kLabelW));
+            arpOctLowSlider.setBounds (row.removeFromLeft (kSliderW));
+            row.removeFromLeft (kGap * 4);
+            arpOctHighLabel.setBounds  (row.removeFromLeft (kLabelW));
+            arpOctHighSlider.setBounds (row);
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 4: Rigidity [slider]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            arpRigidityLabel.setBounds  (row.removeFromLeft (kLabelW));
+            arpRigiditySlider.setBounds (row);
+        }
+    }
+    r.removeFromTop (kGap);
+
+    // =========================================================================
+    // Melody section  (4 rows: enabled; preset; octave; busyness + cadence)
+    // =========================================================================
+    {
+        const int groupH = kGroupPad + kRowH + kGap + kRowH + kGap + kRowH + kGap + kRowH + kInnerPad;
+        auto outer = r.removeFromTop (groupH);
+        melGroup.setBounds (outer);
+
+        auto inner = outer.reduced (kInnerPad).withTrimmedTop (kGroupPad - kInnerPad);
+
+        // Row 1: Melody Enabled toggle
+        {
+            auto row = inner.removeFromTop (kRowH);
+            melEnabledBtn.setBounds (row.removeFromLeft (kTbW));
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 2: Preset [combo, full width]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            melPresetLabel.setBounds (row.removeFromLeft (kLabelW));
+            melPresetCombo.setBounds (row);
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 3: Octave [slider]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            melOctaveLabel.setBounds  (row.removeFromLeft (kLabelW));
+            melOctaveSlider.setBounds (row);
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 4: Busyness [slider]   Cadence [slider]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            melBusynessLabel.setBounds  (row.removeFromLeft (kLabelW));
+            melBusynessSlider.setBounds (row.removeFromLeft (kSliderW));
+            row.removeFromLeft (kGap * 4);
+            melCadenceLabel.setBounds   (row.removeFromLeft (kLabelW));
+            melCadenceSlider.setBounds  (row);
+        }
+    }
+}
+
+void CordialAudioProcessorEditor::timerCallback()
+{
+    const auto next = processor.getLuaDiagnostic();
+    if (diagnostic.getText() != next)
+        diagnostic.setText (next, juce::dontSendNotification);
+}
+
+juce::String CordialAudioProcessorEditor::writeTempMidi()
+{
+    const auto events = processor.getDragSnapshot();
+    if (events.empty()) return {};
+
+    constexpr int kPPQ = 480;
+
+    juce::MidiFile midiFile;
+    midiFile.setTicksPerQuarterNote (kPPQ);
+
+    juce::MidiMessageSequence seq;
+    // 120 BPM tempo marker (500 000 µs / beat) so the file plays back sensibly
+    // when opened standalone; the DAW re-tempo's it to the project on import.
+    seq.addEvent (juce::MidiMessage::tempoMetaEvent (500000), 0);
+
+    for (const auto& ev : events)
+    {
+        const auto onTick  = static_cast<int> (std::round (ev.posBeats * kPPQ));
+        const auto offTick = static_cast<int> (std::round ((ev.posBeats + ev.durBeats) * kPPQ));
+        seq.addEvent (juce::MidiMessage::noteOn  (ev.channel, ev.note,
+                                                  static_cast<juce::uint8> (ev.velocity)), onTick);
+        seq.addEvent (juce::MidiMessage::noteOff (ev.channel, ev.note,
+                                                  static_cast<juce::uint8> (0)), offTick);
+    }
+    seq.updateMatchedPairs();
+    midiFile.addTrack (seq);
+
+    const auto tempFile = juce::File::getSpecialLocation (juce::File::tempDirectory)
+                              .getChildFile ("cordial_drag.mid");
+    juce::FileOutputStream fos (tempFile);
+    if (! fos.openedOk()) return {};
+    if (! midiFile.writeTo (fos)) return {};
+
+    return tempFile.getFullPathName();
 }

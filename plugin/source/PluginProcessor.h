@@ -2,29 +2,41 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <atomic>
+#include <functional>
+#include <mutex>
+#include <vector>
+
+#include "EventQueue.h"
 #include "LuaHost.h"
+#include "Parameters.h"
 
 // ---------------------------------------------------------------------------
-// CordialAudioProcessor — phase 1 scaffold.
+// CordialAudioProcessor — phase 5: APVTS parameters + state persistence.
 //
-// MIDI-effect plugin. The audio thread runs no Lua and allocates nothing in
-// `processBlock`; the cached chord notes are fetched from Lua during
-// construction (and on resume) and copied into a small POD vector that
-// `processBlock` reads.
+// Parameter → generation data flow:
+//   DAW automation / UI control
+//     → APVTS parameter change
+//       → parameterChanged() listener
+//         → worker.requestRegeneration()
+//           → GeneratorWorker::regenerate() reads makeParams()
+//             → LuaHost::generate() → EventQueue
+//               → processBlock emits sample-accurate MIDI
 //
-// Behaviour: when the host transport starts, the next time playback crosses
-// the bar-1 boundary (ppq 0) we emit C-E-G (sourced from host_vst.lua). On
-// the bar-2 boundary we emit the matching note-offs. Stop + restart re-arms.
+// State save/recall: APVTS handles XML round-trip for all registered
+// parameters via getStateInformation / setStateInformation.
 // ---------------------------------------------------------------------------
-class CordialAudioProcessor : public juce::AudioProcessor
+class CordialAudioProcessor : public juce::AudioProcessor,
+                              private juce::AudioProcessorValueTreeState::Listener
 {
 public:
     CordialAudioProcessor();
-    ~CordialAudioProcessor() override = default;
+    ~CordialAudioProcessor() override;
 
-    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    void prepareToPlay  (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
 
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
@@ -32,7 +44,7 @@ public:
     const juce::String getName() const override         { return "Cordial"; }
     bool acceptsMidi()  const override                  { return true; }
     bool producesMidi() const override                  { return true; }
-    bool isMidiEffect() const override                  { return true; }
+    bool isMidiEffect() const override                  { return false; }
     double getTailLengthSeconds() const override        { return 0.0; }
 
     int  getNumPrograms() override                      { return 1; }
@@ -41,22 +53,83 @@ public:
     const juce::String getProgramName (int) override    { return {}; }
     void changeProgramName (int, const juce::String&) override {}
 
-    void getStateInformation (juce::MemoryBlock&) override {}
-    void setStateInformation (const void*, int) override   {}
+    // APVTS handles the XML round-trip for all registered parameters.
+    void getStateInformation (juce::MemoryBlock& destData) override;
+    void setStateInformation (const void* data, int sizeInBytes) override;
 
-    // Exposed for the editor's diagnostic readout.
-    juce::String getLuaDiagnostic() const { return luaDiagnostic; }
+    juce::String getLuaDiagnostic() const;
+    juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
+
+    // Preset name cache — built at construction from Lua; read-only after
+    // that so the editor can access it safely on the message thread.
+    const std::vector<LuaHost::PresetInfo>& getPresetInfos() const { return presetInfos; }
+
+    // Returns a copy of the last generated event list; safe to call on the
+    // message thread (e.g. to write a drag-out MIDI file).
+    std::vector<LuaHost::MidiEvent> getDragSnapshot() const;
 
 private:
-    LuaHost luaHost;
-    std::vector<int> chordNotes;     // populated once from Lua, then read-only
-    int              chordVelocity { 100 };
-    double           chordLengthBeats { 4.0 };
+    // --- APVTS parameter layout (built before worker starts) ----------------
+    static juce::AudioProcessorValueTreeState::ParameterLayout
+    buildParameterLayout (const std::vector<LuaHost::PresetInfo>& presets);
 
-    bool wasPlaying     { false };
-    bool armed          { true };    // re-armed on transport stop
-    bool chordOn        { false };
-    int  samplesUntilOff { 0 };      // > 0 while the chord is sounding
+    // Translates current APVTS values into a Lua-ready Params snapshot.
+    // Thread-safe: reads only atomics.
+    LuaHost::Params makeParams() const;
 
-    juce::String luaDiagnostic;
+    // AudioProcessorValueTreeState::Listener
+    void parameterChanged (const juce::String& parameterID, float newValue) override;
+
+    // -----------------------------------------------------------------------
+    // GeneratorWorker — runs Lua generation off the audio thread.
+    // -----------------------------------------------------------------------
+    class GeneratorWorker : public juce::Thread
+    {
+    public:
+        GeneratorWorker (LuaHost& host,
+                         EventQueue& queue,
+                         std::atomic<int>& eventCountOut,
+                         std::function<LuaHost::Params()> paramProvider,
+                         std::function<void(std::vector<LuaHost::MidiEvent>)> onGenerated);
+
+        void run() override;
+        void requestRegeneration();
+
+    private:
+        void regenerate();
+
+        LuaHost&                       luaHost;
+        EventQueue&                    queue;
+        std::atomic<int>&              lastEventCount;
+        std::function<LuaHost::Params()> paramProvider;
+        std::function<void(std::vector<LuaHost::MidiEvent>)> onGenerated;
+    };
+
+    // Member declaration order matters — luaHost must be first so the APVTS
+    // initialiser (which calls luaHost.getPresets()) can use it.
+    LuaHost                              luaHost;
+    std::vector<LuaHost::PresetInfo>     presetInfos;   // cached before worker starts
+    juce::AudioProcessorValueTreeState   apvts;
+    EventQueue                           eventQueue;
+    GeneratorWorker                      worker;
+
+    juce::String     cachedPing;
+    std::atomic<int> lastEventCount { 0 };
+
+    // Drag-snapshot: written by worker thread, read by message thread.
+    mutable std::mutex               snapshotMutex;
+    std::vector<LuaHost::MidiEvent>  generationSnapshot;
+
+    // Audio-thread-only state.
+    std::vector<LuaHost::MidiEvent> currentGeneration;
+    int     eventCursor            { 0 };
+    int64_t samplesSinceStart      { 0 };
+    double  cachedBpm              { 120.0 };
+    double  progressionLengthBeats { 0.0 };
+
+    struct ActiveNote { int note, channel; int64_t noteOffSample; };
+    std::vector<ActiveNote> activeNotes;
+
+    bool wasPlaying { false };
+    bool armed      { true };
 };
