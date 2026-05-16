@@ -2,27 +2,97 @@
 #include "PluginEditor.h"
 
 // ---------------------------------------------------------------------------
+// Parameter layout — called once during APVTS construction.
+// ---------------------------------------------------------------------------
+juce::AudioProcessorValueTreeState::ParameterLayout
+CordialAudioProcessor::buildParameterLayout (const std::vector<LuaHost::PresetInfo>& presets)
+{
+    juce::AudioProcessorValueTreeState::ParameterLayout layout;
+
+    // Root note (C … B)
+    juce::StringArray rootChoices;
+    for (const auto* name : Params::NOTE_NAMES)
+        rootChoices.add (name);
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { Params::Root, 1 },
+        "Root", rootChoices, 0));  // default = C
+
+    // Progression preset
+    juce::StringArray presetChoices;
+    for (const auto& pi : presets)
+        presetChoices.add (pi.name.isEmpty() ? "Preset" : pi.name);
+    if (presetChoices.isEmpty())
+        presetChoices.add ("Default");
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { Params::Preset, 1 },
+        "Preset", presetChoices, 0));  // default = first preset
+
+    // Octave
+    layout.add (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { Params::Octave, 1 },
+        "Octave",
+        Params::OCTAVE_MIN, Params::OCTAVE_MAX, Params::OCTAVE_DEFAULT));
+
+    // Seed
+    layout.add (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { Params::Seed, 1 },
+        "Seed",
+        Params::SEED_MIN, Params::SEED_MAX, Params::SEED_DEFAULT));
+
+    // Smart voicing
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { Params::SmartVoicing, 1 },
+        "Smart Voicing", true));
+
+    return layout;
+}
+
+// ---------------------------------------------------------------------------
+// makeParams — translates APVTS values into a Lua params snapshot.
+// All reads are from atomic<float>* so this is thread-safe.
+// ---------------------------------------------------------------------------
+LuaHost::Params CordialAudioProcessor::makeParams() const
+{
+    LuaHost::Params p;
+
+    const int rootChoice   = static_cast<int> (
+        apvts.getRawParameterValue (Params::Root)->load (std::memory_order_relaxed));
+    const int presetChoice = static_cast<int> (
+        apvts.getRawParameterValue (Params::Preset)->load (std::memory_order_relaxed));
+
+    p.rootIdx        = rootChoice + 1;          // APVTS 0-based → Lua 1-based
+    p.progressionIdx = presetChoice + 1;        // APVTS 0-based → Lua 1-based
+    p.octave         = static_cast<int> (
+        apvts.getRawParameterValue (Params::Octave)->load (std::memory_order_relaxed));
+    p.seed           = static_cast<int> (
+        apvts.getRawParameterValue (Params::Seed)->load (std::memory_order_relaxed));
+    p.smartVoicing   =
+        apvts.getRawParameterValue (Params::SmartVoicing)->load (std::memory_order_relaxed) > 0.5f;
+
+    return p;
+}
+
+// ---------------------------------------------------------------------------
 // GeneratorWorker
 // ---------------------------------------------------------------------------
-CordialAudioProcessor::GeneratorWorker::GeneratorWorker (LuaHost& host,
-                                                         EventQueue& q,
-                                                         std::atomic<int>& countOut)
+CordialAudioProcessor::GeneratorWorker::GeneratorWorker (
+    LuaHost&                        host,
+    EventQueue&                     q,
+    std::atomic<int>&               countOut,
+    std::function<LuaHost::Params()> provider)
     : juce::Thread ("CordialGenerator"),
-      luaHost (host),
-      queue (q),
-      lastEventCount (countOut)
+      luaHost (host), queue (q),
+      lastEventCount (countOut),
+      paramProvider (std::move (provider))
 {
 }
 
 void CordialAudioProcessor::GeneratorWorker::run()
 {
-    // Initial generation so the queue is populated before the user hits play.
-    regenerate();
+    regenerate();   // initial generation
 
     while (! threadShouldExit())
     {
-        // wait() blocks until notify() or the timeout. The 1-second cap is a
-        // safety net — nothing actually depends on the periodic wake.
         wait (1000);
         if (threadShouldExit()) break;
         regenerate();
@@ -36,17 +106,14 @@ void CordialAudioProcessor::GeneratorWorker::requestRegeneration()
 
 void CordialAudioProcessor::GeneratorWorker::regenerate()
 {
-    // Phase 4 uses the default params. Phase 5 will read live UI params
-    // through a thread-safe snapshot here.
-    LuaHost::Params p;
-    auto events = luaHost.generate (p);
+    auto params = paramProvider();
+    auto events = luaHost.generate (params);
 
     queue.beginGeneration();
     if (! events.empty())
         queue.pushEvents (events.data(), static_cast<int> (events.size()));
 
-    lastEventCount.store (static_cast<int> (events.size()),
-                          std::memory_order_release);
+    lastEventCount.store (static_cast<int> (events.size()), std::memory_order_release);
 }
 
 // ---------------------------------------------------------------------------
@@ -56,26 +123,37 @@ CordialAudioProcessor::CordialAudioProcessor()
     : AudioProcessor (BusesProperties()
                         .withInput  ("Input",  juce::AudioChannelSet::stereo(), true)
                         .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
-      worker (luaHost, eventQueue, lastEventCount)
+      presetInfos (luaHost.getPresets()),          // Lua call before worker starts
+      apvts (*this, nullptr, "CordialState",
+             buildParameterLayout (presetInfos)),
+      worker (luaHost, eventQueue, lastEventCount, [this] { return makeParams(); })
 {
-    // One-time synchronous Lua call from the main thread, before the
-    // worker starts. After this point, the worker is the only thread that
-    // touches Lua.
-    cachedPing = luaHost.ping();
+    cachedPing = luaHost.ping();  // one-time Lua call on main thread
 
-    // Pre-reserve so processBlock never allocates while draining or
-    // tracking notes.
+    // Pre-reserve so processBlock never heap-allocates.
     currentGeneration.reserve (EventQueue::kCapacity);
     activeNotes.reserve (256);
+
+    // Listen for parameter changes → trigger regeneration.
+    for (const auto* id : { Params::Root, Params::Preset,
+                             Params::Octave, Params::Seed, Params::SmartVoicing })
+        apvts.addParameterListener (id, this);
 
     worker.startThread (juce::Thread::Priority::normal);
 }
 
 CordialAudioProcessor::~CordialAudioProcessor()
 {
-    // 2-second join window; the worker has nothing blocking other than
-    // wait(), so it exits promptly.
+    for (const auto* id : { Params::Root, Params::Preset,
+                             Params::Octave, Params::Seed, Params::SmartVoicing })
+        apvts.removeParameterListener (id, this);
+
     worker.stopThread (2000);
+}
+
+void CordialAudioProcessor::parameterChanged (const juce::String& /*paramID*/, float /*newValue*/)
+{
+    worker.requestRegeneration();
 }
 
 void CordialAudioProcessor::prepareToPlay (double, int)
@@ -96,24 +174,33 @@ bool CordialAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) 
     return mainOut == layouts.getMainInputChannelSet();
 }
 
+void CordialAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+{
+    auto state = apvts.copyState();
+    std::unique_ptr<juce::XmlElement> xml (state.createXml());
+    copyXmlToBinary (*xml, destData);
+}
+
+void CordialAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+{
+    std::unique_ptr<juce::XmlElement> xml (getXmlFromBinary (data, sizeInBytes));
+    if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
+        apvts.replaceState (juce::ValueTree::fromXml (*xml));
+}
+
 juce::String CordialAudioProcessor::getLuaDiagnostic() const
 {
     const int n = lastEventCount.load (std::memory_order_acquire);
     if (n <= 0)
-        return "Generating…";
+        return "Generating\xe2\x80\xa6";   // "Generating…" UTF-8
     return "Lua OK (" + juce::String (n) + " events): " + cachedPing;
 }
 
 void CordialAudioProcessor::processBlock (juce::AudioBuffer<float>& audio,
                                           juce::MidiBuffer& midi)
 {
-    juce::ignoreUnused (audio);  // audio passthrough
+    juce::ignoreUnused (audio);
 
-    // Pick up any new generation the worker has published. If true, the
-    // event list was replaced and we restart playback from event 0. Any
-    // notes still sounding from the previous generation are flushed —
-    // their scheduled noteOffSample values were anchored to the old
-    // samplesSinceStart and would otherwise get stuck.
     if (eventQueue.drainTo (currentGeneration))
     {
         for (const auto& an : activeNotes)
@@ -165,7 +252,6 @@ void CordialAudioProcessor::processBlock (juce::AudioBuffer<float>& audio,
     const int64_t bufStart       = samplesSinceStart;
     const int64_t bufEnd         = bufStart + numSamples;
 
-    // Note-offs first (off-then-on if same pitch lands in same buffer).
     for (auto it = activeNotes.begin(); it != activeNotes.end();)
     {
         if (it->noteOffSample < bufEnd)
@@ -175,10 +261,7 @@ void CordialAudioProcessor::processBlock (juce::AudioBuffer<float>& audio,
             midi.addEvent (juce::MidiMessage::noteOff (it->channel, it->note), offset);
             it = activeNotes.erase (it);
         }
-        else
-        {
-            ++it;
-        }
+        else { ++it; }
     }
 
     while (eventCursor < static_cast<int> (currentGeneration.size()))
@@ -196,7 +279,6 @@ void CordialAudioProcessor::processBlock (juce::AudioBuffer<float>& audio,
         const int64_t offSample = static_cast<int64_t> (
             (ev.posBeats + ev.durBeats) * samplesPerBeat);
         activeNotes.push_back ({ ev.note, ev.channel, offSample });
-
         ++eventCursor;
     }
 

@@ -3,35 +3,36 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include <atomic>
+#include <functional>
 #include <vector>
 
 #include "EventQueue.h"
 #include "LuaHost.h"
+#include "Parameters.h"
 
 // ---------------------------------------------------------------------------
-// CordialAudioProcessor — phase 4: threaded generation.
+// CordialAudioProcessor — phase 5: APVTS parameters + state persistence.
 //
-// Architecture:
-//   - LuaHost lives on the worker thread (Lua is single-threaded, so only
-//     the worker calls it after construction).
-//   - Generator worker (juce::Thread) regenerates the event list on signal
-//     and publishes through EventQueue (juce::AbstractFifo).
-//   - processBlock drains the queue lock-free at the top of each buffer
-//     into a pre-reserved local vector, then emits events sample-accurately
-//     using the BPM captured at transport start.
+// Parameter → generation data flow:
+//   DAW automation / UI control
+//     → APVTS parameter change
+//       → parameterChanged() listener
+//         → worker.requestRegeneration()
+//           → GeneratorWorker::regenerate() reads makeParams()
+//             → LuaHost::generate() → EventQueue
+//               → processBlock emits sample-accurate MIDI
 //
-// processBlock realtime contract:
-//   - No heap allocation (queue drain, activeNotes, midi events all reserved)
-//   - No Lua calls
-//   - No locks (SPSC fifo, atomic gen counter)
+// State save/recall: APVTS handles XML round-trip for all registered
+// parameters via getStateInformation / setStateInformation.
 // ---------------------------------------------------------------------------
-class CordialAudioProcessor : public juce::AudioProcessor
+class CordialAudioProcessor : public juce::AudioProcessor,
+                              private juce::AudioProcessorValueTreeState::Listener
 {
 public:
     CordialAudioProcessor();
     ~CordialAudioProcessor() override;
 
-    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    void prepareToPlay  (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
     void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
@@ -51,50 +52,65 @@ public:
     const juce::String getProgramName (int) override    { return {}; }
     void changeProgramName (int, const juce::String&) override {}
 
-    void getStateInformation (juce::MemoryBlock&) override {}
-    void setStateInformation (const void*, int) override   {}
+    // APVTS handles the XML round-trip for all registered parameters.
+    void getStateInformation (juce::MemoryBlock& destData) override;
+    void setStateInformation (const void* data, int sizeInBytes) override;
 
-    // Editor reads this on a Timer; built fresh each call from the atomic
-    // event-count and the ping string cached at construction.
     juce::String getLuaDiagnostic() const;
+    juce::AudioProcessorValueTreeState& getAPVTS() { return apvts; }
+
+    // Preset name cache — built at construction from Lua; read-only after
+    // that so the editor can access it safely on the message thread.
+    const std::vector<LuaHost::PresetInfo>& getPresetInfos() const { return presetInfos; }
 
 private:
+    // --- APVTS parameter layout (built before worker starts) ----------------
+    static juce::AudioProcessorValueTreeState::ParameterLayout
+    buildParameterLayout (const std::vector<LuaHost::PresetInfo>& presets);
+
+    // Translates current APVTS values into a Lua-ready Params snapshot.
+    // Thread-safe: reads only atomics.
+    LuaHost::Params makeParams() const;
+
+    // AudioProcessorValueTreeState::Listener
+    void parameterChanged (const juce::String& parameterID, float newValue) override;
+
     // -----------------------------------------------------------------------
-    // GeneratorWorker — owns the LuaHost and produces into the EventQueue.
-    // Wakes on notify(); regenerates and publishes; sleeps again. Stopped
-    // and joined by the processor's destructor.
+    // GeneratorWorker — runs Lua generation off the audio thread.
     // -----------------------------------------------------------------------
     class GeneratorWorker : public juce::Thread
     {
     public:
-        GeneratorWorker (LuaHost& host, EventQueue& queue,
-                         std::atomic<int>& eventCountOut);
+        GeneratorWorker (LuaHost& host,
+                         EventQueue& queue,
+                         std::atomic<int>& eventCountOut,
+                         std::function<LuaHost::Params()> paramProvider);
 
         void run() override;
-
-        // Ask the worker to regenerate. Thread-safe; just sets a flag and
-        // wakes the thread.
         void requestRegeneration();
 
     private:
         void regenerate();
 
-        LuaHost&          luaHost;
-        EventQueue&       queue;
-        std::atomic<int>& lastEventCount;   // published for the editor
+        LuaHost&                       luaHost;
+        EventQueue&                    queue;
+        std::atomic<int>&              lastEventCount;
+        std::function<LuaHost::Params()> paramProvider;
     };
 
-    LuaHost          luaHost;
-    EventQueue       eventQueue;
-    GeneratorWorker  worker;
+    // Member declaration order matters — luaHost must be first so the APVTS
+    // initialiser (which calls luaHost.getPresets()) can use it.
+    LuaHost                              luaHost;
+    std::vector<LuaHost::PresetInfo>     presetInfos;   // cached before worker starts
+    juce::AudioProcessorValueTreeState   apvts;
+    EventQueue                           eventQueue;
+    GeneratorWorker                      worker;
 
-    // Cached at construction so the editor's diagnostic getter never
-    // touches Lua (and never races the worker on the sol::state).
     juce::String     cachedPing;
     std::atomic<int> lastEventCount { 0 };
 
     // Audio-thread-only state.
-    std::vector<LuaHost::MidiEvent> currentGeneration;  // refilled from queue
+    std::vector<LuaHost::MidiEvent> currentGeneration;
     int     eventCursor       { 0 };
     int64_t samplesSinceStart { 0 };
     double  cachedBpm         { 120.0 };

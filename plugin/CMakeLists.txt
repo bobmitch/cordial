@@ -113,6 +113,7 @@ target_sources(CordialVST PRIVATE
     source/LuaHost.h
     source/EventQueue.cpp
     source/EventQueue.h
+    source/Parameters.h
 )
 
 target_compile_definitions(CordialVST PRIVATE

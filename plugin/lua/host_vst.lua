@@ -1,40 +1,70 @@
 -- ---------------------------------------------------------------------------
--- host_vst.lua  —  the VST plugin's adapter onto core/
+-- host_vst.lua  —  VST plugin adapter onto core/
 --
--- This is the *only* Lua file the C++ shim talks to directly. Any pure
--- music logic belongs in core/. Anything specific to how the VST plugin
--- shapes parameters or surfaces events to JUCE belongs here.
---
--- Phase 3: generate(params) is the main entry point. It accepts a flat
--- params table (same field names as core.chord.build_progression) and
--- returns an array of {pos_beats, note, vel, dur_beats, channel} events.
+-- The only Lua file the C++ shim talks to. All music logic lives in core/.
+-- Phase 5: generate() resolves a PROGRESSIONS catalog preset by index so the
+-- user's root/preset/octave/seed parameters flow end-to-end from DAW → Lua.
 -- ---------------------------------------------------------------------------
 
 local core = require 'core'
 
 local M = {}
 
--- Phase 3 entry point. `params` is a flat table; all fields optional with
--- musically sensible defaults. Returns an array of event records that the
--- C++ side converts to sample-accurate MIDI in processBlock.
+-- ---------------------------------------------------------------------------
+-- get_presets() → array of {name, cat}
 --
--- Event record: { pos_beats, note, vel, dur_beats, channel }
---   pos_beats  — beat position relative to generation start (0 = first note)
---   note       — MIDI pitch 0..127
---   vel        — MIDI velocity 1..127
---   dur_beats  — sounding length in beats (note-off sent at pos_beats + dur_beats)
---   channel    — MIDI channel 1..16
+-- Called once at plugin construction (main thread, before worker starts) so
+-- the C++ side can build the AudioParameterChoice list without touching Lua
+-- again. Array is 1-based; index i maps to PROGRESSIONS[i].
+-- ---------------------------------------------------------------------------
+function M.get_presets()
+    local result = {}
+    for _, p in ipairs(core.progressions.PROGRESSIONS) do
+        result[#result + 1] = { name = p.name or "", cat = p.cat or "" }
+    end
+    return result
+end
+
+-- ---------------------------------------------------------------------------
+-- generate(params) → array of {pos_beats, note, vel, dur_beats, channel}
+--
+-- params fields (all optional with defaults):
+--   progression_idx  int   1-based index into PROGRESSIONS; 0 = use params.degrees
+--   root_idx         int   1=C … 12=B (key root, always honoured)
+--   octave           int   voicing octave for the lowest chord tone
+--   timesig_num      int   beats per bar
+--   smart_voicing    bool  voice-leading inversion picker
+--   seed             int   RNG seed (stored, used by arp/melody in later phases)
+--   mode             str   fallback mode when progression_idx == 0
+--   degrees          array fallback degrees when progression_idx == 0
+-- ---------------------------------------------------------------------------
 function M.generate(params)
+    local mode            = params.mode or "major"
+    local degrees         = params.degrees or {1, 4, 5, 1}
+    local quality_overrides = params.quality_overrides
+    local durations       = params.durations
+
+    -- When a preset index is given, pull mode/degrees/qualities from the
+    -- PROGRESSIONS catalog. Root note (root_idx) is still the user's choice.
+    local idx = params.progression_idx or 0
+    if idx > 0 then
+        local preset = core.progressions.PROGRESSIONS[idx]
+        if preset then
+            mode             = preset.mode     or mode
+            degrees          = preset.degrees  or degrees
+            quality_overrides = preset.qualities
+            durations        = nil  -- preset doesn't encode durations; use default 1-bar each
+        end
+    end
+
     local prog = core.chord.build_progression {
-        mode              = params.mode or "major",
+        mode              = mode,
         root_idx          = params.root_idx or 1,
         octave            = params.octave or 4,
         timesig_num       = params.timesig_num or 4,
-        degrees           = params.degrees or {1, 4, 5, 1},
-        quality_overrides = params.quality_overrides,
-        inversions        = params.inversions,
-        bass_overrides    = params.bass_overrides,
-        durations         = params.durations,
+        degrees           = degrees,
+        quality_overrides = quality_overrides,
+        durations         = durations,
         smart_voicing     = params.smart_voicing ~= false,
     }
 
@@ -42,8 +72,6 @@ function M.generate(params)
     local pos    = 0.0
 
     for _, slot in ipairs(prog) do
-        -- `slot.voicing` includes the slash bass note when present.
-        -- For basic degrees without slash bass, voicing == notes.
         for _, note in ipairs(slot.voicing) do
             events[#events + 1] = {
                 pos_beats = pos,
@@ -59,9 +87,7 @@ function M.generate(params)
     return events
 end
 
--- Diagnostic for the editor. Reports Lua version + a couple of facts
--- about the loaded core so a regression in the preload wiring is
--- visible at a glance.
+-- Diagnostic — reports Lua version + core vitals. Safe for main thread only.
 function M.ping()
     return string.format("pong from Lua %s (core: %d progressions, NOTE_NAMES[1]=%s)",
                          _VERSION,

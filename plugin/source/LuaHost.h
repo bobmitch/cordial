@@ -9,34 +9,46 @@
 
 // ---------------------------------------------------------------------------
 // LuaHost — owns the embedded sol::state and exposes typed helpers that the
-// AudioProcessor can call. All Lua interaction must go through this class so
-// that the C++ surface stays narrow and the audio thread never touches Lua.
+// AudioProcessor can call. All Lua interaction must go through this class.
+// Post-construction the worker thread is the only caller; the audio thread
+// never touches Lua.
 //
-// Phase 3: generate(Params) calls host_vst.lua's generate() function and
-//          returns a flat list of MidiEvent records (beats, not samples).
-//          The processor converts beats→samples using the live BPM.
+// Phase 5 adds: getPresets() (called once at construction to populate the
+// APVTS choice list) and updates Params to carry progressionIdx + seed.
 // ---------------------------------------------------------------------------
 class LuaHost
 {
 public:
     // -----------------------------------------------------------------------
-    // Parameter struct — passed into generate(). Mirrors the flat table that
-    // core.chord.build_progression accepts. Phase 5 will populate this from
-    // AudioProcessorValueTreeState; for now it holds hardcoded defaults.
+    // Parameter struct — one snapshot per generation. Fields mirror the flat
+    // table expected by host_vst.lua / core.chord.build_progression.
     // -----------------------------------------------------------------------
     struct Params
     {
-        std::string      mode         { "major" };
-        int              rootIdx      { 1 };          // 1 = C, 2 = C#/Db, ...
-        int              octave       { 4 };
-        int              timesigNum   { 4 };
-        std::vector<int> degrees      { 1, 4, 5, 1 }; // I-IV-V-I
-        bool             smartVoicing { true };
+        std::string      mode          { "major" };   // fallback when progressionIdx == 0
+        int              rootIdx       { 1 };          // 1=C … 12=B
+        int              octave        { 4 };
+        int              timesigNum    { 4 };
+        std::vector<int> degrees       { 1, 4, 5, 1 }; // used when progressionIdx == 0
+        bool             smartVoicing  { true };
+        int              progressionIdx { 1 };          // 1-based into PROGRESSIONS; 0 = manual
+        int              seed          { 1 };           // RNG seed (used by arp/melody layers)
     };
 
     // -----------------------------------------------------------------------
-    // One scheduled MIDI event. Positions and durations are in beats so the
-    // audio thread can convert to samples using the live BPM each block.
+    // Progression preset metadata — cached at construction from the Lua
+    // PROGRESSIONS catalog so the editor never needs to call Lua directly.
+    // -----------------------------------------------------------------------
+    struct PresetInfo
+    {
+        juce::String name;
+        juce::String category;
+    };
+
+    // -----------------------------------------------------------------------
+    // One scheduled MIDI event returned by generate(). Positions and
+    // durations are in beats; the audio thread converts to samples using
+    // the live BPM captured at transport start.
     // -----------------------------------------------------------------------
     struct MidiEvent
     {
@@ -49,11 +61,20 @@ public:
 
     LuaHost();
 
-    // Build a flat event list from core.chord (and eventually arp/melody).
-    // Safe to call from any non-audio thread. Returns an empty vector on error.
-    std::vector<MidiEvent> generate(const Params& params);
+    // -----------------------------------------------------------------------
+    // Called once at construction (before the worker thread starts) to
+    // populate the APVTS AudioParameterChoice list.
+    // -----------------------------------------------------------------------
+    std::vector<PresetInfo> getPresets();
 
-    // Diagnostic — round-trips a string through Lua. Useful in CI smoke tests.
+    // -----------------------------------------------------------------------
+    // Called by the worker thread to build the event list for the current
+    // parameter snapshot. Returns empty on Lua error.
+    // -----------------------------------------------------------------------
+    std::vector<MidiEvent> generate (const Params& params);
+
+    // Diagnostic — round-trips a string through Lua. Safe to call from the
+    // main thread before the worker has started.
     juce::String ping();
 
 private:
