@@ -111,6 +111,8 @@ target_sources(CordialVST PRIVATE
     source/PluginEditor.h
     source/LuaHost.cpp
     source/LuaHost.h
+    source/EventQueue.cpp
+    source/EventQueue.h
 )
 
 target_compile_definitions(CordialVST PRIVATE

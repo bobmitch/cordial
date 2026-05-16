@@ -5,9 +5,12 @@
 
 #include "PluginProcessor.h"
 
-// Phase 1 editor: just a label so we can confirm the plugin loaded and Lua
-// is running. ImGui-in-JUCE comes online in phase 6.
-class CordialAudioProcessorEditor : public juce::AudioProcessorEditor
+// Minimal editor — a heading and a diagnostic label. The diagnostic is
+// polled on a timer so the "Generating…" → "Lua OK (N events): …" swap
+// shows up once the worker has published its first generation. ImGui-in-JUCE
+// replaces this in phase 6.
+class CordialAudioProcessorEditor : public juce::AudioProcessorEditor,
+                                    private juce::Timer
 {
 public:
     explicit CordialAudioProcessorEditor (CordialAudioProcessor&);
@@ -17,6 +20,8 @@ public:
     void resized() override;
 
 private:
+    void timerCallback() override;
+
     CordialAudioProcessor& processor;
     juce::Label            heading;
     juce::Label            diagnostic;

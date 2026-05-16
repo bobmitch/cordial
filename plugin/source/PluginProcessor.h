@@ -2,27 +2,34 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 
+#include <atomic>
+#include <vector>
+
+#include "EventQueue.h"
 #include "LuaHost.h"
 
 // ---------------------------------------------------------------------------
-// CordialAudioProcessor — phase 3: full chord-progression generation.
+// CordialAudioProcessor — phase 4: threaded generation.
 //
-// The LuaHost calls host_vst.lua's generate() once at construction (and
-// will be called again in Phase 5 when parameters change). The resulting
-// MidiEvent list is stored in beats; processBlock converts to sample offsets
-// using the live BPM from the host playhead.
+// Architecture:
+//   - LuaHost lives on the worker thread (Lua is single-threaded, so only
+//     the worker calls it after construction).
+//   - Generator worker (juce::Thread) regenerates the event list on signal
+//     and publishes through EventQueue (juce::AbstractFifo).
+//   - processBlock drains the queue lock-free at the top of each buffer
+//     into a pre-reserved local vector, then emits events sample-accurately
+//     using the BPM captured at transport start.
 //
 // processBlock realtime contract:
-//   - Allocates nothing on the heap (note: activeNotes can grow; fixed in Phase 4)
-//   - Calls no Lua
-//   - Takes no locks
-//   - Never blocks
+//   - No heap allocation (queue drain, activeNotes, midi events all reserved)
+//   - No Lua calls
+//   - No locks (SPSC fifo, atomic gen counter)
 // ---------------------------------------------------------------------------
 class CordialAudioProcessor : public juce::AudioProcessor
 {
 public:
     CordialAudioProcessor();
-    ~CordialAudioProcessor() override = default;
+    ~CordialAudioProcessor() override;
 
     void prepareToPlay (double sampleRate, int samplesPerBlock) override;
     void releaseResources() override {}
@@ -47,27 +54,54 @@ public:
     void getStateInformation (juce::MemoryBlock&) override {}
     void setStateInformation (const void*, int) override   {}
 
-    juce::String getLuaDiagnostic() const { return luaDiagnostic; }
+    // Editor reads this on a Timer; built fresh each call from the atomic
+    // event-count and the ping string cached at construction.
+    juce::String getLuaDiagnostic() const;
 
 private:
-    LuaHost luaHost;
+    // -----------------------------------------------------------------------
+    // GeneratorWorker — owns the LuaHost and produces into the EventQueue.
+    // Wakes on notify(); regenerates and publishes; sleeps again. Stopped
+    // and joined by the processor's destructor.
+    // -----------------------------------------------------------------------
+    class GeneratorWorker : public juce::Thread
+    {
+    public:
+        GeneratorWorker (LuaHost& host, EventQueue& queue,
+                         std::atomic<int>& eventCountOut);
 
-    // Pre-generated event list (beats). Populated at construction from Lua;
-    // will be regenerated in Phase 5 when parameters change.
-    std::vector<LuaHost::MidiEvent> midiEvents;
+        void run() override;
 
-    // Per-playback state — reset on every transport start.
+        // Ask the worker to regenerate. Thread-safe; just sets a flag and
+        // wakes the thread.
+        void requestRegeneration();
+
+    private:
+        void regenerate();
+
+        LuaHost&          luaHost;
+        EventQueue&       queue;
+        std::atomic<int>& lastEventCount;   // published for the editor
+    };
+
+    LuaHost          luaHost;
+    EventQueue       eventQueue;
+    GeneratorWorker  worker;
+
+    // Cached at construction so the editor's diagnostic getter never
+    // touches Lua (and never races the worker on the sol::state).
+    juce::String     cachedPing;
+    std::atomic<int> lastEventCount { 0 };
+
+    // Audio-thread-only state.
+    std::vector<LuaHost::MidiEvent> currentGeneration;  // refilled from queue
     int     eventCursor       { 0 };
     int64_t samplesSinceStart { 0 };
     double  cachedBpm         { 120.0 };
 
-    // Active (sounding) notes waiting for their note-off.
-    // Note: std::vector may allocate; a lock-free ring replaces this in Phase 4.
     struct ActiveNote { int note, channel; int64_t noteOffSample; };
     std::vector<ActiveNote> activeNotes;
 
     bool wasPlaying { false };
     bool armed      { true };
-
-    juce::String luaDiagnostic;
 };

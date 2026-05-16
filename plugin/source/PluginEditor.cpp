@@ -12,6 +12,9 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     diagnostic.setJustificationType (juce::Justification::centred);
     addAndMakeVisible (diagnostic);
 
+    // 4 Hz is plenty for a "Generating…" → "Lua OK" swap-once readout.
+    startTimerHz (4);
+
     setSize (720, 180);
 }
 
@@ -25,4 +28,11 @@ void CordialAudioProcessorEditor::resized()
     auto r = getLocalBounds().reduced (16);
     heading.setBounds    (r.removeFromTop (40));
     diagnostic.setBounds (r.removeFromTop (40));
+}
+
+void CordialAudioProcessorEditor::timerCallback()
+{
+    const auto next = processor.getLuaDiagnostic();
+    if (diagnostic.getText() != next)
+        diagnostic.setText (next, juce::dontSendNotification);
 }
