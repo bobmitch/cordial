@@ -5,9 +5,13 @@
 
 #include "PluginProcessor.h"
 
-// Functional editor for Phase 5. Controls are attached to the APVTS so they
-// participate in DAW automation and preset recall. ImGui replaces this in
-// Phase 6, so the layout stays deliberately simple.
+// ---------------------------------------------------------------------------
+// CordialAudioProcessorEditor — Phase 6
+//
+// Layout: four GroupComponent sections (Global, Chord, Arp, Melody) laid out
+// top-to-bottom. All controls are wired via APVTS attachments for DAW
+// automation and preset recall.
+// ---------------------------------------------------------------------------
 class CordialAudioProcessorEditor : public juce::AudioProcessorEditor,
                                     private juce::Timer
 {
@@ -24,31 +28,71 @@ private:
     CordialAudioProcessor& processor;
     juce::AudioProcessorValueTreeState& apvts;
 
-    // --- Labels --------------------------------------------------------------
+    // --- Top bar -------------------------------------------------------------
     juce::Label heading;
     juce::Label diagnostic;
 
-    juce::Label rootLabel   { {}, "Root" };
-    juce::Label presetLabel { {}, "Preset" };
-    juce::Label octaveLabel { {}, "Octave" };
-    juce::Label seedLabel   { {}, "Seed" };
-    juce::Label svLabel     { {}, "Smart voicing" };
+    // --- Section group borders -----------------------------------------------
+    juce::GroupComponent globalGroup;
+    juce::GroupComponent chordGroup;
+    juce::GroupComponent arpGroup;
+    juce::GroupComponent melGroup;
 
-    // --- Controls ------------------------------------------------------------
+    // --- Global section labels -----------------------------------------------
+    juce::Label rootLabel    { {}, "Root" };
+    juce::Label octaveLabel  { {}, "Octave" };
+    juce::Label presetLabel  { {}, "Preset" };
+    juce::Label seedLabel    { {}, "Seed" };
+
+    // --- Global section controls ---------------------------------------------
     juce::ComboBox rootCombo;
-    juce::ComboBox presetCombo;
     juce::Slider   octaveSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::ComboBox presetCombo;
     juce::Slider   seedSlider   { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+
+    // --- Chord section -------------------------------------------------------
+    juce::ToggleButton chordEnabledBtn;
     juce::ToggleButton svButton;
+
+    // --- Arp section labels --------------------------------------------------
+    juce::Label arpPatternLabel { {}, "Pattern" };
+    juce::Label arpRateLabel    { {}, "Rate" };
+    juce::Label arpOctavesLabel { {}, "Octaves" };
+    juce::Label arpRigidityLabel{ {}, "Rigidity" };
+
+    // --- Arp section controls ------------------------------------------------
+    juce::ToggleButton arpEnabledBtn;
+    juce::ComboBox     arpPatternCombo;
+    juce::ComboBox     arpRateCombo;
+    juce::Slider       arpOctavesSlider  { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::Slider       arpRigiditySlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+
+    // --- Melody section ------------------------------------------------------
+    juce::ToggleButton melEnabledBtn;
+    juce::Label        melComingLabel;
 
     // --- APVTS attachments ---------------------------------------------------
     using ComboAttachment  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
     using SliderAttachment = juce::AudioProcessorValueTreeState::SliderAttachment;
     using ButtonAttachment = juce::AudioProcessorValueTreeState::ButtonAttachment;
 
+    // Global
     std::unique_ptr<ComboAttachment>  rootAttachment;
-    std::unique_ptr<ComboAttachment>  presetAttachment;
     std::unique_ptr<SliderAttachment> octaveAttachment;
+    std::unique_ptr<ComboAttachment>  presetAttachment;
     std::unique_ptr<SliderAttachment> seedAttachment;
+
+    // Chord
+    std::unique_ptr<ButtonAttachment> chordEnabledAttachment;
     std::unique_ptr<ButtonAttachment> svAttachment;
+
+    // Arp
+    std::unique_ptr<ButtonAttachment> arpEnabledAttachment;
+    std::unique_ptr<ComboAttachment>  arpPatternAttachment;
+    std::unique_ptr<ComboAttachment>  arpRateAttachment;
+    std::unique_ptr<SliderAttachment> arpOctavesAttachment;
+    std::unique_ptr<SliderAttachment> arpRigidityAttachment;
+
+    // Melody
+    std::unique_ptr<ButtonAttachment> melEnabledAttachment;
 };

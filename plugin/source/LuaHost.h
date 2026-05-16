@@ -32,7 +32,20 @@ public:
         std::vector<int> degrees       { 1, 4, 5, 1 }; // used when progressionIdx == 0
         bool             smartVoicing  { true };
         int              progressionIdx { 1 };          // 1-based into PROGRESSIONS; 0 = manual
-        int              seed          { 1 };           // RNG seed (used by arp/melody layers)
+        int              seed          { 1 };           // RNG seed
+
+        // Chord layer
+        bool        chordEnabled  { true };
+
+        // Arp layer
+        bool        arpEnabled    { false };
+        std::string arpPattern    { "Up" };
+        double      arpRateBeats  { 0.25 };   // 1/16 note
+        int         arpOctaves    { 1 };
+        int         arpRigidity   { 0 };      // 0 = chord tones only (passed as-is to Lua)
+
+        // Melody layer
+        bool        melEnabled    { false };
     };
 
     // -----------------------------------------------------------------------

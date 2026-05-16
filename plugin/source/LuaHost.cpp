@@ -114,6 +114,15 @@ std::vector<LuaHost::MidiEvent> LuaHost::generate (const Params& params)
     p["progression_idx"] = params.progressionIdx;
     p["seed"]            = params.seed;
 
+    // Phase 6: layer enable flags + arp parameters
+    p["chord_enabled"]   = params.chordEnabled;
+    p["arp_enabled"]     = params.arpEnabled;
+    p["arp_pattern"]     = params.arpPattern;
+    p["arp_rate_beats"]  = params.arpRateBeats;
+    p["arp_octaves"]     = params.arpOctaves;
+    p["arp_rigidity"]    = params.arpRigidity;
+    p["mel_enabled"]     = params.melEnabled;
+
     sol::table degs = lua.create_table();
     for (std::size_t i = 0; i < params.degrees.size(); ++i)
         degs[static_cast<int> (i + 1)] = params.degrees[i];
