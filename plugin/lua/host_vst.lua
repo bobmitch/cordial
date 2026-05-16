@@ -129,6 +129,38 @@ function M.generate(params)
         pos = pos + slot.duration
     end
 
+    -- Melody layer (channel 3)
+    if params.mel_enabled then
+        local mel_params = {
+            preset_idx      = params.mel_preset    or 1,
+            phrasing_idx    = 1,        -- Normal (diatonic)
+            anchor_mode     = 2,        -- Chord root
+            anchor_oct      = params.octave or 4,
+            range_down      = 7,        -- semitones below anchor
+            range_up        = 14,       -- semitones above anchor
+            min_dur_beats   = 0.25,     -- 1/16 minimum note
+            max_dur_beats   = 2.0,      -- half note maximum
+            velocity        = 80,
+            vel_human       = 12,
+            busyness        = params.mel_busyness or 50,
+            cadence         = params.mel_cadence  or 60,
+            space           = 0,
+            rhythm_rigidity = 0,
+            root_idx        = params.root_idx or 1,
+            mode            = mode,
+            octave          = params.octave or 4,
+            timesig_num     = params.timesig_num or 4,
+            seed            = params.seed or 1,
+        }
+        local mel_evs = core.melody.build_events(prog, mel_params)
+        for _, ev in ipairs(mel_evs) do
+            events[#events + 1] = {
+                pos_beats = ev.pos, note = ev.pitch,
+                vel = ev.vel, dur_beats = ev.dur, channel = 3,
+            }
+        end
+    end
+
     -- Sort by beat position so the C++ drain-loop scans forward correctly.
     table.sort(events, function(a, b)
         if a.pos_beats ~= b.pos_beats then return a.pos_beats < b.pos_beats end

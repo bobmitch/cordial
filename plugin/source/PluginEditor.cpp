@@ -113,16 +113,29 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     addAndMakeVisible (melGroup);
 
     melEnabledBtn.setButtonText ("Enabled");
-    melEnabledBtn.setEnabled (false);
     addAndMakeVisible (melEnabledBtn);
     melEnabledAttachment = std::make_unique<ButtonAttachment> (
         apvts, Params::MelEnabled, melEnabledBtn);
 
-    melComingLabel.setText ("Melody generation \xe2\x80\x94 coming in a later phase",
-                            juce::dontSendNotification);
-    melComingLabel.setFont (juce::Font (juce::FontOptions (11.0f, juce::Font::italic)));
-    melComingLabel.setJustificationType (juce::Justification::centredLeft);
-    addAndMakeVisible (melComingLabel);
+    melPresetLabel.setJustificationType (juce::Justification::centredRight);
+    addAndMakeVisible (melPresetLabel);
+    addAndMakeVisible (melPresetCombo);
+    melPresetAttachment = std::make_unique<ComboAttachment> (
+        apvts, Params::MelPreset, melPresetCombo);
+
+    melBusynessLabel.setJustificationType (juce::Justification::centredRight);
+    melBusynessSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
+    addAndMakeVisible (melBusynessLabel);
+    addAndMakeVisible (melBusynessSlider);
+    melBusynessAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::MelBusyness, melBusynessSlider);
+
+    melCadenceLabel.setJustificationType (juce::Justification::centredRight);
+    melCadenceSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
+    addAndMakeVisible (melCadenceLabel);
+    addAndMakeVisible (melCadenceSlider);
+    melCadenceAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::MelCadence, melCadenceSlider);
 
     startTimerHz (4);
 
@@ -246,19 +259,39 @@ void CordialAudioProcessorEditor::resized()
     r.removeFromTop (kGap);
 
     // =========================================================================
-    // Melody section  (1 row: disabled Enabled toggle + coming-soon label)
+    // Melody section  (3 rows: enabled; preset; busyness + cadence)
     // =========================================================================
     {
-        const int groupH = kGroupPad + kRowH + kInnerPad;
+        const int groupH = kGroupPad + kRowH + kGap + kRowH + kGap + kRowH + kInnerPad;
         auto outer = r.removeFromTop (groupH);
         melGroup.setBounds (outer);
 
         auto inner = outer.reduced (kInnerPad).withTrimmedTop (kGroupPad - kInnerPad);
-        auto row   = inner.removeFromTop (kRowH);
 
-        melEnabledBtn.setBounds (row.removeFromLeft (kTbW));
-        row.removeFromLeft (kGap * 2);
-        melComingLabel.setBounds (row);
+        // Row 1: Melody Enabled toggle
+        {
+            auto row = inner.removeFromTop (kRowH);
+            melEnabledBtn.setBounds (row.removeFromLeft (kTbW));
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 2: Preset [combo, full width]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            melPresetLabel.setBounds (row.removeFromLeft (kLabelW));
+            melPresetCombo.setBounds (row);
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 3: Busyness [slider]   Cadence [slider]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            melBusynessLabel.setBounds  (row.removeFromLeft (kLabelW));
+            melBusynessSlider.setBounds (row.removeFromLeft (kSliderW));
+            row.removeFromLeft (kGap * 4);
+            melCadenceLabel.setBounds   (row.removeFromLeft (kLabelW));
+            melCadenceSlider.setBounds  (row);
+        }
     }
 }
 

@@ -65,6 +65,17 @@ CordialAudioProcessor::buildParameterLayout (const std::vector<LuaHost::PresetIn
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { Params::MelEnabled, 1 }, "Melody", false));
 
+    juce::StringArray melPresetChoices;
+    for (const auto* mp : Params::MEL_PRESETS) melPresetChoices.add (mp);
+    layout.add (std::make_unique<juce::AudioParameterChoice> (
+        juce::ParameterID { Params::MelPreset, 1 }, "Mel Preset",
+        melPresetChoices, 0));  // default = Free
+
+    layout.add (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { Params::MelBusyness, 1 }, "Mel Busyness", 0, 100, 50));
+    layout.add (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { Params::MelCadence,  1 }, "Mel Cadence",  0, 100, 60));
+
     return layout;
 }
 
@@ -97,6 +108,10 @@ LuaHost::Params CordialAudioProcessor::makeParams() const
     p.arpRigidity    = static_cast<int> (load (Params::ArpRigidity));
 
     p.melEnabled     = load (Params::MelEnabled)    > 0.5f;
+    const int melPresetIdx = std::clamp (static_cast<int> (load (Params::MelPreset)), 0, 4);
+    p.melPreset      = melPresetIdx + 1;   // 1-based for Lua preset_idx
+    p.melBusyness    = static_cast<int> (load (Params::MelBusyness));
+    p.melCadence     = static_cast<int> (load (Params::MelCadence));
 
     return p;
 }
@@ -154,6 +169,8 @@ namespace
         Params::ArpEnabled,  Params::ArpPattern,
         Params::ArpRate,     Params::ArpOctaves,
         Params::ArpRigidity, Params::MelEnabled,
+        Params::MelPreset,   Params::MelBusyness,
+        Params::MelCadence,
     };
 }
 

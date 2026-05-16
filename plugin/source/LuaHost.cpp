@@ -122,6 +122,9 @@ std::vector<LuaHost::MidiEvent> LuaHost::generate (const Params& params)
     p["arp_octaves"]     = params.arpOctaves;
     p["arp_rigidity"]    = params.arpRigidity;
     p["mel_enabled"]     = params.melEnabled;
+    p["mel_preset"]      = params.melPreset;
+    p["mel_busyness"]    = params.melBusyness;
+    p["mel_cadence"]     = params.melCadence;
 
     sol::table degs = lua.create_table();
     for (std::size_t i = 0; i < params.degrees.size(); ++i)

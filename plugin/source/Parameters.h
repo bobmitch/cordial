@@ -29,6 +29,9 @@ namespace Params
 
     // Melody layer
     inline constexpr const char* MelEnabled   = "mel_enabled";
+    inline constexpr const char* MelPreset    = "mel_preset";
+    inline constexpr const char* MelBusyness  = "mel_busyness";
+    inline constexpr const char* MelCadence   = "mel_cadence";
 
     // Mirrored from core/theory.lua so C++ can map int indices to names
     // without calling Lua after the worker has started. Must be kept in
@@ -58,4 +61,10 @@ namespace Params
     // Index 0=1/4, 1=1/8, 2=1/16, 3=1/32.
     inline constexpr std::array<const char*, 4> ARP_RATES       { "1/4", "1/8", "1/16", "1/32" };
     inline constexpr std::array<double,      4> ARP_RATE_BEATS  { 1.0,   0.5,   0.25,   0.125  };
+
+    // Melody strategy presets — parallel with mel_preset AudioParameterChoice.
+    // Indices 1-based in Lua; APVTS stores 0-based.
+    inline constexpr std::array<const char*, 5> MEL_PRESETS {
+        "Free", "Motif", "Mechanical", "Pedal Point", "Call & Response"
+    };
 }

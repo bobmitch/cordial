@@ -113,7 +113,15 @@ private:
 
     // --- Melody section ------------------------------------------------------
     juce::ToggleButton melEnabledBtn;
-    juce::Label        melComingLabel;
+
+    juce::Label    melPresetLabel   { {}, "Preset" };
+    juce::ComboBox melPresetCombo;
+
+    juce::Label  melBusynessLabel { {}, "Busyness" };
+    juce::Slider melBusynessSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+
+    juce::Label  melCadenceLabel  { {}, "Cadence" };
+    juce::Slider melCadenceSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     // --- APVTS attachments ---------------------------------------------------
     using ComboAttachment  = juce::AudioProcessorValueTreeState::ComboBoxAttachment;
@@ -139,4 +147,7 @@ private:
 
     // Melody
     std::unique_ptr<ButtonAttachment> melEnabledAttachment;
+    std::unique_ptr<ComboAttachment>  melPresetAttachment;
+    std::unique_ptr<SliderAttachment> melBusynessAttachment;
+    std::unique_ptr<SliderAttachment> melCadenceAttachment;
 };

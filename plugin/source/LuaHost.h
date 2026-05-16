@@ -46,6 +46,9 @@ public:
 
         // Melody layer
         bool        melEnabled    { false };
+        int         melPreset     { 1 };    // 1-based index into MEL_PRESETS (Lua preset_idx)
+        int         melBusyness   { 50 };   // 0–100
+        int         melCadence    { 60 };   // 0–100
     };
 
     // -----------------------------------------------------------------------
