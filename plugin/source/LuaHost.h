@@ -38,15 +38,17 @@ public:
         bool        chordEnabled  { true };
 
         // Arp layer
-        bool        arpEnabled    { false };
-        std::string arpPattern    { "Up" };
-        double      arpRateBeats  { 0.25 };   // 1/16 note
-        int         arpOctaves    { 1 };
-        int         arpRigidity   { 0 };      // 0 = chord tones only (passed as-is to Lua)
+        bool        arpEnabled     { false };
+        std::string arpPattern     { "Up" };
+        double      arpRateBeats   { 0.25 };  // 1/16 note
+        int         arpOctaveLow   { 4 };
+        int         arpOctaveHigh  { 5 };
+        int         arpRigidity    { 0 };     // 0 = chord tones only (passed as-is to Lua)
 
         // Melody layer
         bool        melEnabled    { false };
         int         melPreset     { 1 };    // 1-based index into MEL_PRESETS (Lua preset_idx)
+        int         melOctave     { 4 };
         int         melBusyness   { 50 };   // 0–100
         int         melCadence    { 60 };   // 0–100
     };

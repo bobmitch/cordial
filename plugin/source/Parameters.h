@@ -21,15 +21,17 @@ namespace Params
     inline constexpr const char* ChordEnabled = "chord_enabled";
 
     // Arp layer
-    inline constexpr const char* ArpEnabled   = "arp_enabled";
-    inline constexpr const char* ArpPattern   = "arp_pattern";
-    inline constexpr const char* ArpRate      = "arp_rate";
-    inline constexpr const char* ArpOctaves   = "arp_octaves";
-    inline constexpr const char* ArpRigidity  = "arp_rigidity";
+    inline constexpr const char* ArpEnabled    = "arp_enabled";
+    inline constexpr const char* ArpPattern    = "arp_pattern";
+    inline constexpr const char* ArpRate       = "arp_rate";
+    inline constexpr const char* ArpOctaveLow  = "arp_oct_low";
+    inline constexpr const char* ArpOctaveHigh = "arp_oct_high";
+    inline constexpr const char* ArpRigidity   = "arp_rigidity";
 
     // Melody layer
     inline constexpr const char* MelEnabled   = "mel_enabled";
     inline constexpr const char* MelPreset    = "mel_preset";
+    inline constexpr const char* MelOctave    = "mel_octave";
     inline constexpr const char* MelBusyness  = "mel_busyness";
     inline constexpr const char* MelCadence   = "mel_cadence";
 
@@ -58,9 +60,18 @@ namespace Params
     };
 
     // Arp rate display labels and corresponding beat values.
-    // Index 0=1/4, 1=1/8, 2=1/16, 3=1/32.
-    inline constexpr std::array<const char*, 4> ARP_RATES       { "1/4", "1/8", "1/16", "1/32" };
-    inline constexpr std::array<double,      4> ARP_RATE_BEATS  { 1.0,   0.5,   0.25,   0.125  };
+    // Triplet values: 1/4T = 2/3 beat, 1/8T = 1/3, 1/16T = 1/6, 1/32T = 1/12.
+    inline constexpr std::array<const char*, 8> ARP_RATES {
+        "1/4", "1/4T", "1/8", "1/8T", "1/16", "1/16T", "1/32", "1/32T"
+    };
+    inline constexpr std::array<double, 8> ARP_RATE_BEATS {
+        1.0, 2.0/3.0, 0.5, 1.0/3.0, 0.25, 1.0/6.0, 0.125, 1.0/12.0
+    };
+
+    inline constexpr int ARP_OCT_MIN     = 2;
+    inline constexpr int ARP_OCT_MAX     = 7;
+    inline constexpr int ARP_OCT_LOW_DEF = 4;
+    inline constexpr int ARP_OCT_HIGH_DEF= 5;
 
     // Melody strategy presets — parallel with mel_preset AudioParameterChoice.
     // Indices 1-based in Lua; APVTS stores 0-based.

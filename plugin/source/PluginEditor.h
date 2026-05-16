@@ -99,16 +99,18 @@ private:
     juce::ToggleButton svButton;
 
     // --- Arp section labels --------------------------------------------------
-    juce::Label arpPatternLabel { {}, "Pattern" };
-    juce::Label arpRateLabel    { {}, "Rate" };
-    juce::Label arpOctavesLabel { {}, "Octaves" };
-    juce::Label arpRigidityLabel{ {}, "Rigidity" };
+    juce::Label arpPatternLabel  { {}, "Pattern" };
+    juce::Label arpRateLabel     { {}, "Rate" };
+    juce::Label arpOctLowLabel   { {}, "Oct Low" };
+    juce::Label arpOctHighLabel  { {}, "Oct High" };
+    juce::Label arpRigidityLabel { {}, "Rigidity" };
 
     // --- Arp section controls ------------------------------------------------
     juce::ToggleButton arpEnabledBtn;
     juce::ComboBox     arpPatternCombo;
     juce::ComboBox     arpRateCombo;
-    juce::Slider       arpOctavesSlider  { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::Slider       arpOctLowSlider   { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::Slider       arpOctHighSlider  { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     juce::Slider       arpRigiditySlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     // --- Melody section ------------------------------------------------------
@@ -117,7 +119,10 @@ private:
     juce::Label    melPresetLabel   { {}, "Preset" };
     juce::ComboBox melPresetCombo;
 
-    juce::Label  melBusynessLabel { {}, "Busyness" };
+    juce::Label  melOctaveLabel  { {}, "Octave" };
+    juce::Slider melOctaveSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+
+    juce::Label  melBusynessLabel  { {}, "Busyness" };
     juce::Slider melBusynessSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     juce::Label  melCadenceLabel  { {}, "Cadence" };
@@ -142,12 +147,14 @@ private:
     std::unique_ptr<ButtonAttachment> arpEnabledAttachment;
     std::unique_ptr<ComboAttachment>  arpPatternAttachment;
     std::unique_ptr<ComboAttachment>  arpRateAttachment;
-    std::unique_ptr<SliderAttachment> arpOctavesAttachment;
+    std::unique_ptr<SliderAttachment> arpOctLowAttachment;
+    std::unique_ptr<SliderAttachment> arpOctHighAttachment;
     std::unique_ptr<SliderAttachment> arpRigidityAttachment;
 
     // Melody
     std::unique_ptr<ButtonAttachment> melEnabledAttachment;
     std::unique_ptr<ComboAttachment>  melPresetAttachment;
+    std::unique_ptr<SliderAttachment> melOctaveAttachment;
     std::unique_ptr<SliderAttachment> melBusynessAttachment;
     std::unique_ptr<SliderAttachment> melCadenceAttachment;
 };

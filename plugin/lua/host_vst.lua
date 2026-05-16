@@ -97,7 +97,8 @@ function M.generate(params)
             local global_pcs = core.voicing.scale_pc_set(mode, params.root_idx or 1)
             local chord_scale_pcs = core.voicing.chord_scale_pc_set(
                 slot.notes, slot.root_midi, global_pcs)
-            local oct = params.octave or 4
+            local oct_low  = params.arp_oct_low  or 4
+            local oct_high = params.arp_oct_high or 5
             -- Invert: UI arp_rigidity 100 (chord-tones only) → Lua rigidity 0.
             -- UI arp_rigidity 0 (all scale tones) → Lua rigidity 100.
             local rigidity_pct = 100 - (params.arp_rigidity or 0)
@@ -108,8 +109,8 @@ function M.generate(params)
                     gate              = 80,
                     velocity          = 90,
                     vel_human         = 10,
-                    oct_low           = oct,
-                    oct_high          = oct + math.max(0, (params.arp_octaves or 1) - 1),
+                    oct_low           = math.min(oct_low, oct_high),
+                    oct_high          = math.max(oct_low, oct_high),
                     rigidity          = rigidity_pct,
                     chord_scale_pcs   = chord_scale_pcs,
                     timesig_num       = params.timesig_num or 4,
@@ -135,7 +136,7 @@ function M.generate(params)
             preset_idx      = params.mel_preset    or 1,
             phrasing_idx    = 1,        -- Normal (diatonic)
             anchor_mode     = 2,        -- Chord root
-            anchor_oct      = params.octave or 4,
+            anchor_oct      = params.mel_octave or params.octave or 4,
             range_down      = 7,        -- semitones below anchor
             range_up        = 14,       -- semitones above anchor
             min_dur_beats   = 0.25,     -- 1/16 minimum note

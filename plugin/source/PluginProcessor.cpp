@@ -54,16 +54,24 @@ CordialAudioProcessor::buildParameterLayout (const std::vector<LuaHost::PresetIn
     for (const auto* r : Params::ARP_RATES) arpRateChoices.add (r);
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { Params::ArpRate, 1 }, "Arp Rate",
-        arpRateChoices, 2));  // default 1/16
+        arpRateChoices, 4));  // default 1/16 (index 4 in expanded array)
 
     layout.add (std::make_unique<juce::AudioParameterInt> (
-        juce::ParameterID { Params::ArpOctaves, 1 }, "Arp Octaves", 1, 3, 1));
+        juce::ParameterID { Params::ArpOctaveLow, 1 }, "Arp Oct Low",
+        Params::ARP_OCT_MIN, Params::ARP_OCT_MAX, Params::ARP_OCT_LOW_DEF));
+    layout.add (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { Params::ArpOctaveHigh, 1 }, "Arp Oct High",
+        Params::ARP_OCT_MIN, Params::ARP_OCT_MAX, Params::ARP_OCT_HIGH_DEF));
     layout.add (std::make_unique<juce::AudioParameterInt> (
         juce::ParameterID { Params::ArpRigidity, 1 }, "Arp Rigidity", 0, 100, 100));
 
     // --- Melody layer --------------------------------------------------------
     layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { Params::MelEnabled, 1 }, "Melody", false));
+
+    layout.add (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { Params::MelOctave, 1 }, "Mel Octave",
+        Params::OCTAVE_MIN, Params::OCTAVE_MAX, Params::OCTAVE_DEFAULT));
 
     juce::StringArray melPresetChoices;
     for (const auto* mp : Params::MEL_PRESETS) melPresetChoices.add (mp);
@@ -102,12 +110,14 @@ LuaHost::Params CordialAudioProcessor::makeParams() const
     p.arpEnabled     = load (Params::ArpEnabled)    > 0.5f;
     const int arpPatIdx  = std::clamp (static_cast<int> (load (Params::ArpPattern)), 0, 8);
     p.arpPattern     = Params::ARP_PATTERNS[static_cast<std::size_t> (arpPatIdx)];
-    const int arpRateIdx = std::clamp (static_cast<int> (load (Params::ArpRate)), 0, 3);
+    const int arpRateIdx = std::clamp (static_cast<int> (load (Params::ArpRate)), 0, 7);
     p.arpRateBeats   = Params::ARP_RATE_BEATS[static_cast<std::size_t> (arpRateIdx)];
-    p.arpOctaves     = static_cast<int> (load (Params::ArpOctaves));
+    p.arpOctaveLow   = static_cast<int> (load (Params::ArpOctaveLow));
+    p.arpOctaveHigh  = static_cast<int> (load (Params::ArpOctaveHigh));
     p.arpRigidity    = static_cast<int> (load (Params::ArpRigidity));
 
     p.melEnabled     = load (Params::MelEnabled)    > 0.5f;
+    p.melOctave      = static_cast<int> (load (Params::MelOctave));
     const int melPresetIdx = std::clamp (static_cast<int> (load (Params::MelPreset)), 0, 4);
     p.melPreset      = melPresetIdx + 1;   // 1-based for Lua preset_idx
     p.melBusyness    = static_cast<int> (load (Params::MelBusyness));
@@ -167,13 +177,14 @@ void CordialAudioProcessor::GeneratorWorker::regenerate()
 namespace
 {
     constexpr const char* kListenedParams[] = {
-        Params::Root,        Params::Preset,
-        Params::Octave,      Params::Seed,
-        Params::SmartVoicing,Params::ChordEnabled,
-        Params::ArpEnabled,  Params::ArpPattern,
-        Params::ArpRate,     Params::ArpOctaves,
-        Params::ArpRigidity, Params::MelEnabled,
-        Params::MelPreset,   Params::MelBusyness,
+        Params::Root,           Params::Preset,
+        Params::Octave,         Params::Seed,
+        Params::SmartVoicing,   Params::ChordEnabled,
+        Params::ArpEnabled,     Params::ArpPattern,
+        Params::ArpRate,        Params::ArpOctaveLow,
+        Params::ArpOctaveHigh,  Params::ArpRigidity,
+        Params::MelEnabled,     Params::MelOctave,
+        Params::MelPreset,      Params::MelBusyness,
         Params::MelCadence,
     };
 }
@@ -268,6 +279,11 @@ void CordialAudioProcessor::processBlock (juce::AudioBuffer<float>& audio,
             midi.addEvent (juce::MidiMessage::noteOff (an.channel, an.note), 0);
         activeNotes.clear();
         eventCursor = 0; samplesSinceStart = 0;
+
+        progressionLengthBeats = 0.0;
+        for (const auto& ev : currentGeneration)
+            progressionLengthBeats = std::max (progressionLengthBeats,
+                                               ev.posBeats + ev.durBeats);
     }
 
     auto* ph = getPlayHead();
@@ -338,6 +354,17 @@ void CordialAudioProcessor::processBlock (juce::AudioBuffer<float>& audio,
     }
 
     samplesSinceStart += numSamples;
+
+    // Loop the progression once all events have been played.
+    if (! currentGeneration.empty() && progressionLengthBeats > 0.0)
+    {
+        const auto loopSamples = static_cast<int64_t> (progressionLengthBeats * samplesPerBeat);
+        if (loopSamples > 0 && samplesSinceStart >= loopSamples)
+        {
+            samplesSinceStart = samplesSinceStart % loopSamples;
+            eventCursor = 0;
+        }
+    }
 }
 
 juce::AudioProcessorEditor* CordialAudioProcessor::createEditor()

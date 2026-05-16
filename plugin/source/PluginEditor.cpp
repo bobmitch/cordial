@@ -116,12 +116,19 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     arpRateAttachment = std::make_unique<ComboAttachment> (
         apvts, Params::ArpRate, arpRateCombo);
 
-    arpOctavesLabel.setJustificationType (juce::Justification::centredRight);
-    arpOctavesSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 28, kRowH);
-    addAndMakeVisible (arpOctavesLabel);
-    addAndMakeVisible (arpOctavesSlider);
-    arpOctavesAttachment = std::make_unique<SliderAttachment> (
-        apvts, Params::ArpOctaves, arpOctavesSlider);
+    arpOctLowLabel.setJustificationType (juce::Justification::centredRight);
+    arpOctLowSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 28, kRowH);
+    addAndMakeVisible (arpOctLowLabel);
+    addAndMakeVisible (arpOctLowSlider);
+    arpOctLowAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::ArpOctaveLow, arpOctLowSlider);
+
+    arpOctHighLabel.setJustificationType (juce::Justification::centredRight);
+    arpOctHighSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 28, kRowH);
+    addAndMakeVisible (arpOctHighLabel);
+    addAndMakeVisible (arpOctHighSlider);
+    arpOctHighAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::ArpOctaveHigh, arpOctHighSlider);
 
     arpRigidityLabel.setJustificationType (juce::Justification::centredRight);
     arpRigiditySlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
@@ -150,6 +157,13 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     melPresetAttachment = std::make_unique<ComboAttachment> (
         apvts, Params::MelPreset, melPresetCombo);
 
+    melOctaveLabel.setJustificationType (juce::Justification::centredRight);
+    melOctaveSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
+    addAndMakeVisible (melOctaveLabel);
+    addAndMakeVisible (melOctaveSlider);
+    melOctaveAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::MelOctave, melOctaveSlider);
+
     melBusynessLabel.setJustificationType (juce::Justification::centredRight);
     melBusynessSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
     addAndMakeVisible (melBusynessLabel);
@@ -166,7 +180,7 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
 
     startTimerHz (4);
 
-    setSize (720, 500);
+    setSize (720, 565);
 }
 
 void CordialAudioProcessorEditor::paint (juce::Graphics& g)
@@ -246,10 +260,10 @@ void CordialAudioProcessorEditor::resized()
     r.removeFromTop (kGap);
 
     // =========================================================================
-    // Arp section  (3 rows: enabled; pattern + rate; octaves + rigidity)
+    // Arp section  (4 rows: enabled; pattern + rate; oct low + oct high; rigidity)
     // =========================================================================
     {
-        const int groupH = kGroupPad + kRowH + kGap + kRowH + kGap + kRowH + kInnerPad;
+        const int groupH = kGroupPad + kRowH + kGap + kRowH + kGap + kRowH + kGap + kRowH + kInnerPad;
         auto outer = r.removeFromTop (groupH);
         arpGroup.setBounds (outer);
 
@@ -273,12 +287,20 @@ void CordialAudioProcessorEditor::resized()
         }
         inner.removeFromTop (kGap);
 
-        // Row 3: Octaves [slider]   Rigidity [slider]
+        // Row 3: Oct Low [slider]   Oct High [slider]
         {
             auto row = inner.removeFromTop (kRowH);
-            arpOctavesLabel.setBounds  (row.removeFromLeft (kLabelW));
-            arpOctavesSlider.setBounds (row.removeFromLeft (kSliderW));
+            arpOctLowLabel.setBounds  (row.removeFromLeft (kLabelW));
+            arpOctLowSlider.setBounds (row.removeFromLeft (kSliderW));
             row.removeFromLeft (kGap * 4);
+            arpOctHighLabel.setBounds  (row.removeFromLeft (kLabelW));
+            arpOctHighSlider.setBounds (row);
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 4: Rigidity [slider]
+        {
+            auto row = inner.removeFromTop (kRowH);
             arpRigidityLabel.setBounds  (row.removeFromLeft (kLabelW));
             arpRigiditySlider.setBounds (row);
         }
@@ -286,10 +308,10 @@ void CordialAudioProcessorEditor::resized()
     r.removeFromTop (kGap);
 
     // =========================================================================
-    // Melody section  (3 rows: enabled; preset; busyness + cadence)
+    // Melody section  (4 rows: enabled; preset; octave; busyness + cadence)
     // =========================================================================
     {
-        const int groupH = kGroupPad + kRowH + kGap + kRowH + kGap + kRowH + kInnerPad;
+        const int groupH = kGroupPad + kRowH + kGap + kRowH + kGap + kRowH + kGap + kRowH + kInnerPad;
         auto outer = r.removeFromTop (groupH);
         melGroup.setBounds (outer);
 
@@ -310,7 +332,15 @@ void CordialAudioProcessorEditor::resized()
         }
         inner.removeFromTop (kGap);
 
-        // Row 3: Busyness [slider]   Cadence [slider]
+        // Row 3: Octave [slider]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            melOctaveLabel.setBounds  (row.removeFromLeft (kLabelW));
+            melOctaveSlider.setBounds (row);
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 4: Busyness [slider]   Cadence [slider]
         {
             auto row = inner.removeFromTop (kRowH);
             melBusynessLabel.setBounds  (row.removeFromLeft (kLabelW));

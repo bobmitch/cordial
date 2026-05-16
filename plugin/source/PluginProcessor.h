@@ -122,9 +122,10 @@ private:
 
     // Audio-thread-only state.
     std::vector<LuaHost::MidiEvent> currentGeneration;
-    int     eventCursor       { 0 };
-    int64_t samplesSinceStart { 0 };
-    double  cachedBpm         { 120.0 };
+    int     eventCursor            { 0 };
+    int64_t samplesSinceStart      { 0 };
+    double  cachedBpm              { 120.0 };
+    double  progressionLengthBeats { 0.0 };
 
     struct ActiveNote { int note, channel; int64_t noteOffSample; };
     std::vector<ActiveNote> activeNotes;
