@@ -138,7 +138,11 @@ void CordialAudioProcessor::GeneratorWorker::run()
     regenerate();
     while (! threadShouldExit())
     {
-        wait (1000);
+        // Wait indefinitely until requestRegeneration() calls notify().
+        // Polling (e.g. wait(1000)) would force a spurious regenerate every
+        // second, which restarts playback because drainTo() detects a new
+        // generation and resets samplesSinceStart / eventCursor.
+        wait (-1);
         if (threadShouldExit()) break;
         regenerate();
     }
