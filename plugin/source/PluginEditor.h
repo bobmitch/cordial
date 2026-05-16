@@ -84,19 +84,19 @@ private:
 
     // --- Global section labels -----------------------------------------------
     juce::Label rootLabel    { {}, "Root" };
-    juce::Label octaveLabel  { {}, "Octave" };
     juce::Label presetLabel  { {}, "Preset" };
     juce::Label seedLabel    { {}, "Seed" };
 
     // --- Global section controls ---------------------------------------------
     juce::ComboBox rootCombo;
-    juce::Slider   octaveSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
     juce::ComboBox presetCombo;
-    juce::Slider   seedSlider   { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
+    juce::Slider   seedSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     // --- Chord section -------------------------------------------------------
     juce::ToggleButton chordEnabledBtn;
     juce::ToggleButton svButton;
+    juce::Label        chordOctaveLabel  { {}, "Octave" };
+    juce::Slider       chordOctaveSlider { juce::Slider::LinearHorizontal, juce::Slider::TextBoxRight };
 
     // --- Arp section labels --------------------------------------------------
     juce::Label arpPatternLabel  { {}, "Pattern" };
@@ -135,13 +135,13 @@ private:
 
     // Global
     std::unique_ptr<ComboAttachment>  rootAttachment;
-    std::unique_ptr<SliderAttachment> octaveAttachment;
     std::unique_ptr<ComboAttachment>  presetAttachment;
     std::unique_ptr<SliderAttachment> seedAttachment;
 
     // Chord
     std::unique_ptr<ButtonAttachment> chordEnabledAttachment;
     std::unique_ptr<ButtonAttachment> svAttachment;
+    std::unique_ptr<SliderAttachment> chordOctaveAttachment;
 
     // Arp
     std::unique_ptr<ButtonAttachment> arpEnabledAttachment;

@@ -108,13 +108,13 @@ std::vector<LuaHost::MidiEvent> LuaHost::generate (const Params& params)
     sol::table p = lua.create_table();
     p["mode"]            = params.mode;
     p["root_idx"]        = params.rootIdx;
-    p["octave"]          = params.octave;
     p["timesig_num"]     = params.timesigNum;
     p["smart_voicing"]   = params.smartVoicing;
     p["progression_idx"] = params.progressionIdx;
     p["seed"]            = params.seed;
 
     p["chord_enabled"]   = params.chordEnabled;
+    p["chord_octave"]    = params.chordOctave;
     p["arp_enabled"]     = params.arpEnabled;
     p["arp_pattern"]     = params.arpPattern;
     p["arp_rate_beats"]  = params.arpRateBeats;

@@ -27,7 +27,6 @@ public:
     {
         std::string      mode          { "major" };   // fallback when progressionIdx == 0
         int              rootIdx       { 1 };          // 1=C … 12=B
-        int              octave        { 4 };
         int              timesigNum    { 4 };
         std::vector<int> degrees       { 1, 4, 5, 1 }; // used when progressionIdx == 0
         bool             smartVoicing  { true };
@@ -36,6 +35,7 @@ public:
 
         // Chord layer
         bool        chordEnabled  { true };
+        int         chordOctave   { 4 };
 
         // Arp layer
         bool        arpEnabled     { false };

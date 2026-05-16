@@ -24,11 +24,6 @@ CordialAudioProcessor::buildParameterLayout (const std::vector<LuaHost::PresetIn
     layout.add (std::make_unique<juce::AudioParameterChoice> (
         juce::ParameterID { Params::Preset, 1 }, "Preset", presetChoices, 0));
 
-    // Octave
-    layout.add (std::make_unique<juce::AudioParameterInt> (
-        juce::ParameterID { Params::Octave, 1 }, "Octave",
-        Params::OCTAVE_MIN, Params::OCTAVE_MAX, Params::OCTAVE_DEFAULT));
-
     // Seed
     layout.add (std::make_unique<juce::AudioParameterInt> (
         juce::ParameterID { Params::Seed, 1 }, "Seed",
@@ -36,9 +31,12 @@ CordialAudioProcessor::buildParameterLayout (const std::vector<LuaHost::PresetIn
 
     // --- Chord layer ---------------------------------------------------------
     layout.add (std::make_unique<juce::AudioParameterBool> (
-        juce::ParameterID { Params::SmartVoicing, 1 }, "Smart Voicing", true));
-    layout.add (std::make_unique<juce::AudioParameterBool> (
         juce::ParameterID { Params::ChordEnabled, 1 }, "Chord", true));
+    layout.add (std::make_unique<juce::AudioParameterBool> (
+        juce::ParameterID { Params::SmartVoicing, 1 }, "Smart Voicing", true));
+    layout.add (std::make_unique<juce::AudioParameterInt> (
+        juce::ParameterID { Params::ChordOctave, 1 }, "Chord Octave",
+        Params::OCTAVE_MIN, Params::OCTAVE_MAX, Params::OCTAVE_DEFAULT));
 
     // --- Arp layer -----------------------------------------------------------
     layout.add (std::make_unique<juce::AudioParameterBool> (
@@ -102,10 +100,10 @@ LuaHost::Params CordialAudioProcessor::makeParams() const
 
     p.rootIdx        = static_cast<int> (load (Params::Root))   + 1;
     p.progressionIdx = static_cast<int> (load (Params::Preset)) + 1;
-    p.octave         = static_cast<int> (load (Params::Octave));
     p.seed           = static_cast<int> (load (Params::Seed));
     p.smartVoicing   = load (Params::SmartVoicing) > 0.5f;
     p.chordEnabled   = load (Params::ChordEnabled)  > 0.5f;
+    p.chordOctave    = static_cast<int> (load (Params::ChordOctave));
 
     p.arpEnabled     = load (Params::ArpEnabled)    > 0.5f;
     const int arpPatIdx  = std::clamp (static_cast<int> (load (Params::ArpPattern)), 0, 8);
@@ -178,8 +176,8 @@ namespace
 {
     constexpr const char* kListenedParams[] = {
         Params::Root,           Params::Preset,
-        Params::Octave,         Params::Seed,
-        Params::SmartVoicing,   Params::ChordEnabled,
+        Params::Seed,           Params::ChordEnabled,
+        Params::SmartVoicing,   Params::ChordOctave,
         Params::ArpEnabled,     Params::ArpPattern,
         Params::ArpRate,        Params::ArpOctaveLow,
         Params::ArpOctaveHigh,  Params::ArpRigidity,

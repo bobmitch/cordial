@@ -70,7 +70,7 @@ function M.generate(params)
     local prog = core.chord.build_progression {
         mode              = mode,
         root_idx          = params.root_idx or 1,
-        octave            = params.octave or 4,
+        octave            = params.chord_octave or 4,
         timesig_num       = params.timesig_num or 4,
         degrees           = degrees,
         quality_overrides = quality_overrides,
@@ -132,15 +132,18 @@ function M.generate(params)
 
     -- Melody layer (channel 3)
     if params.mel_enabled then
+        local mel_oct = params.mel_octave or 4
         local mel_params = {
             preset_idx      = params.mel_preset    or 1,
             phrasing_idx    = 1,        -- Normal (diatonic)
-            anchor_mode     = 2,        -- Chord root
-            anchor_oct      = params.mel_octave or params.octave or 4,
-            range_down      = 7,        -- semitones below anchor
-            range_up        = 14,       -- semitones above anchor
-            min_dur_beats   = 0.25,     -- 1/16 minimum note
-            max_dur_beats   = 2.0,      -- half note maximum
+            -- anchor_mode = 1 (key root) so melody honours its own octave;
+            -- mode 2 (chord root) would tie melody to the chord layer's register.
+            anchor_mode     = 1,
+            anchor_oct      = mel_oct,
+            range_down      = 7,
+            range_up        = 14,
+            min_dur_beats   = 0.25,
+            max_dur_beats   = 2.0,
             velocity        = 80,
             vel_human       = 12,
             busyness        = params.mel_busyness or 50,
@@ -149,7 +152,7 @@ function M.generate(params)
             rhythm_rigidity = 0,
             root_idx        = params.root_idx or 1,
             mode            = mode,
-            octave          = params.octave or 4,
+            octave          = mel_oct,
             timesig_num     = params.timesig_num or 4,
             seed            = params.seed or 1,
         }

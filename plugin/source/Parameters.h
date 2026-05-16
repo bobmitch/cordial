@@ -13,12 +13,12 @@ namespace Params
     // elsewhere in the C++ codebase.
     inline constexpr const char* Root         = "root";
     inline constexpr const char* Preset       = "preset";
-    inline constexpr const char* Octave       = "octave";
     inline constexpr const char* Seed         = "seed";
     inline constexpr const char* SmartVoicing = "smart_voicing";
 
     // Chord layer
     inline constexpr const char* ChordEnabled = "chord_enabled";
+    inline constexpr const char* ChordOctave  = "chord_octave";
 
     // Arp layer
     inline constexpr const char* ArpEnabled    = "arp_enabled";

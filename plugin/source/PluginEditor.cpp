@@ -48,12 +48,6 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     }
     rootAttachment = std::make_unique<ComboAttachment> (apvts, Params::Root, rootCombo);
 
-    octaveLabel.setJustificationType (juce::Justification::centredRight);
-    octaveSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
-    addAndMakeVisible (octaveLabel);
-    addAndMakeVisible (octaveSlider);
-    octaveAttachment = std::make_unique<SliderAttachment> (apvts, Params::Octave, octaveSlider);
-
     presetLabel.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (presetLabel);
     addAndMakeVisible (presetCombo);
@@ -84,6 +78,13 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     svButton.setButtonText ("Smart voicing");
     addAndMakeVisible (svButton);
     svAttachment = std::make_unique<ButtonAttachment> (apvts, Params::SmartVoicing, svButton);
+
+    chordOctaveLabel.setJustificationType (juce::Justification::centredRight);
+    chordOctaveSlider.setTextBoxStyle (juce::Slider::TextBoxRight, false, 34, kRowH);
+    addAndMakeVisible (chordOctaveLabel);
+    addAndMakeVisible (chordOctaveSlider);
+    chordOctaveAttachment = std::make_unique<SliderAttachment> (
+        apvts, Params::ChordOctave, chordOctaveSlider);
 
     // --- Arp section ---------------------------------------------------------
     arpGroup.setText ("Arp");
@@ -203,25 +204,23 @@ void CordialAudioProcessorEditor::resized()
     r.removeFromTop (kGap);
 
     // =========================================================================
-    // Global section  (3 rows × kRowH + gaps + top/bottom padding)
-    // 3 rows + 2 gaps + kGroupPad (title) + kInnerPad (bottom) = ~110px
+    // Global section  (2 rows: Root + Seed; Preset)
     // =========================================================================
     {
-        const int groupH = kGroupPad + kRowH + kGap + kRowH + kGap + kRowH + kInnerPad;
+        const int groupH = kGroupPad + kRowH + kGap + kRowH + kInnerPad;
         auto outer = r.removeFromTop (groupH);
         globalGroup.setBounds (outer);
 
-        // Inner area sits below the group title bar and inset from borders.
         auto inner = outer.reduced (kInnerPad).withTrimmedTop (kGroupPad - kInnerPad);
 
-        // Row 1: Root [combo]   Octave [slider]
+        // Row 1: Root [combo]   Seed [slider]
         {
             auto row = inner.removeFromTop (kRowH);
             rootLabel.setBounds  (row.removeFromLeft (kLabelW));
             rootCombo.setBounds  (row.removeFromLeft (kComboW));
             row.removeFromLeft   (kGap * 4);
-            octaveLabel.setBounds  (row.removeFromLeft (kLabelW));
-            octaveSlider.setBounds (row);
+            seedLabel.setBounds  (row.removeFromLeft (kLabelW));
+            seedSlider.setBounds (row);
         }
         inner.removeFromTop (kGap);
 
@@ -231,31 +230,34 @@ void CordialAudioProcessorEditor::resized()
             presetLabel.setBounds (row.removeFromLeft (kLabelW));
             presetCombo.setBounds (row);
         }
-        inner.removeFromTop (kGap);
-
-        // Row 3: Seed [slider]
-        {
-            auto row = inner.removeFromTop (kRowH);
-            seedLabel.setBounds  (row.removeFromLeft (kLabelW));
-            seedSlider.setBounds (row);
-        }
     }
     r.removeFromTop (kGap);
 
     // =========================================================================
-    // Chord section  (1 row: Chord Enabled toggle + Smart Voicing toggle)
+    // Chord section  (2 rows: Enabled + Smart Voicing toggle; Octave [slider])
     // =========================================================================
     {
-        const int groupH = kGroupPad + kRowH + kInnerPad;
+        const int groupH = kGroupPad + kRowH + kGap + kRowH + kInnerPad;
         auto outer = r.removeFromTop (groupH);
         chordGroup.setBounds (outer);
 
         auto inner = outer.reduced (kInnerPad).withTrimmedTop (kGroupPad - kInnerPad);
-        auto row   = inner.removeFromTop (kRowH);
 
-        chordEnabledBtn.setBounds (row.removeFromLeft (kTbW));
-        row.removeFromLeft (kGap * 4);
-        svButton.setBounds (row.removeFromLeft (kTbW + 30));
+        // Row 1: Enabled + Smart Voicing
+        {
+            auto row = inner.removeFromTop (kRowH);
+            chordEnabledBtn.setBounds (row.removeFromLeft (kTbW));
+            row.removeFromLeft (kGap * 4);
+            svButton.setBounds (row.removeFromLeft (kTbW + 30));
+        }
+        inner.removeFromTop (kGap);
+
+        // Row 2: Octave [slider]
+        {
+            auto row = inner.removeFromTop (kRowH);
+            chordOctaveLabel.setBounds  (row.removeFromLeft (kLabelW));
+            chordOctaveSlider.setBounds (row);
+        }
     }
     r.removeFromTop (kGap);
 
