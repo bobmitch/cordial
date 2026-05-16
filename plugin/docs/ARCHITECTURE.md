@@ -34,7 +34,9 @@ plugin/
 │       # through a typed C++ method here. Keeps the C++ ↔ Lua boundary
 │       # in exactly one place, which is what Phase 3 expands.
 ├── lua/                  # Lua, embedded as binary data into the plugin
-│   ├── host_vst.lua      # phase 1 stub. Phase 2 wires it to require core/.
+│   ├── host_vst.lua      # VST adapter — requires core, exposes the
+│   │                     # functions the C++ shim calls. Keep thin:
+│   │                     # any pure music belongs in core/.
 │   ├── host_reaper.lua   # REAPER glue: UI, MIDI item writer, live preview,
 │   │                     # project persistence. Source of truth — every edit
 │   │                     # to the REAPER product happens here, NOT in the
@@ -42,14 +44,15 @@ plugin/
 │   └── core/             # host-agnostic music engine, carved out of the
 │                         # original cordial.lua during phase 2. Each file
 │                         # is a Lua module (`local M = {}; ... return M`).
+│       ├── init.lua      # ✅ aggregator — `require 'core'` gives all 8
 │       ├── theory.lua    # ✅ extracted (phase 2a)
 │       ├── progressions.lua  # ✅ extracted (phase 2b)
 │       ├── rng.lua       # ✅ extracted (phase 2c)
-│       ├── chord.lua     # ✅ extracted (phase 2d)
-│       ├── arp.lua       # ✅ extracted (phase 2e)
+│       ├── chord.lua     # ✅ extracted (phase 2d, +build_progression in 2g)
+│       ├── arp.lua       # ✅ extracted (phase 2e, +build_events in 2i)
 │       ├── voicing.lua   # ✅ extracted (phase 2f)
 │       ├── bass.lua      # ✅ extracted (phase 2h)
-│       └── melody.lua    # ✅ extracted (phase 2j)
+│       └── melody.lua    # ✅ extracted (phase 2j) — full pipeline
 ├── scripts/
 │   ├── build-windows.ps1     # plugin build helper
 │   └── bundle-cordial.lua    # regenerates repo-root cordial.lua from

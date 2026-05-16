@@ -70,7 +70,7 @@ output for a fixed seed + parameter set against the previous build.
 | 2h | `core/bass.lua` | ✅ shipped | 5 styles (Root / Root-Fifth / Walking / Boogie / Pattern) with params. Bass keeps its own RNG stream — host reseeds before calling. |
 | 2i | `core/arp.lua` gains `build_arp_events` | ✅ shipped | Full arp event builder with params, including the inlined `resolve_step_prob` helper for accent-grid probabilities. Verified Up + Chord + all-prob-zero. |
 | 2j | `core/melody.lua` | ✅ shipped | Full melody pipeline (phrase arc + tension/density + landing rule + metric weight + grid quantisation + phrase planner + skeleton + surface walker + colour tones + all 8 `mel_strat_*` + `mel_fill_block` + `MEL_GEN_FNS` + cycle/event entry points). Module-local `p` upvalue avoids threading params through every signature; host wrapper translates state. Smoke-tested with all 8 presets — distinct event counts, deterministic per seed. |
-| 2k | `core/init.lua` + `host_vst.lua` wiring | ⏳ next | Public surface; plugin embeds modules via JUCE `BinaryData` and `package.preload` |
+| 2k | `core/init.lua` + `host_vst.lua` wiring | ✅ shipped | `core/init.lua` aggregates all eight modules behind `require 'core'`. CMake bundles every core file as JUCE `BinaryData`. `LuaHost.cpp` registers each via `package.preload` before loading `host_vst.lua`, so `require 'core.X'` resolves to the embedded source. `phase1_chord()` now routes through `core.chord.build_progression` end-to-end — same C-E-G output, exercises the full C++ → preload → require → core → table-return → C++ path. |
 
 ## Verification per sub-commit
 

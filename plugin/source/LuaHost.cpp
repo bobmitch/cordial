@@ -2,12 +2,57 @@
 
 #include "BinaryData.h"
 
+namespace
+{
+    // One entry per Lua module embedded as JUCE BinaryData. The `require`
+    // name is what host_vst.lua (and any core module that does
+    // `require 'core.X'`) asks for; the src/size point at the embedded
+    // source bytes. Order doesn't matter — preload is lazy.
+    struct PreloadEntry { const char* requireName; const char* src; int size; };
+
+    const PreloadEntry kCoreModules[] = {
+        { "core",             BinaryData::init_lua,         BinaryData::init_luaSize         },
+        { "core.theory",      BinaryData::theory_lua,       BinaryData::theory_luaSize       },
+        { "core.progressions",BinaryData::progressions_lua, BinaryData::progressions_luaSize },
+        { "core.rng",         BinaryData::rng_lua,          BinaryData::rng_luaSize          },
+        { "core.chord",       BinaryData::chord_lua,        BinaryData::chord_luaSize        },
+        { "core.arp",         BinaryData::arp_lua,          BinaryData::arp_luaSize          },
+        { "core.voicing",     BinaryData::voicing_lua,      BinaryData::voicing_luaSize      },
+        { "core.bass",        BinaryData::bass_lua,         BinaryData::bass_luaSize         },
+        { "core.melody",      BinaryData::melody_lua,       BinaryData::melody_luaSize       },
+    };
+}
+
 LuaHost::LuaHost()
 {
     lua.open_libraries(sol::lib::base,
                        sol::lib::math,
                        sol::lib::string,
-                       sol::lib::table);
+                       sol::lib::table,
+                       sol::lib::package);  // for package.preload[]
+
+    // Register every core module's source with package.preload BEFORE
+    // loading host_vst.lua. The closure runs on first require for that
+    // module name; the result (the `return M` value) is cached by Lua
+    // for subsequent requires.
+    sol::table preload = lua["package"]["preload"];
+    for (const auto& m : kCoreModules)
+    {
+        std::string src (m.src, static_cast<std::size_t>(m.size));
+        std::string name = m.requireName;
+        preload[name] = [src, name](sol::this_state s) -> sol::object {
+            sol::state_view lv (s);
+            auto r = lv.safe_script (src, sol::script_pass_on_error);
+            if (! r.valid())
+            {
+                sol::error err = r;
+                juce::Logger::writeToLog ("Cordial preload of " + juce::String (name)
+                                          + " failed: " + err.what());
+                return sol::lua_nil;
+            }
+            return r;
+        };
+    }
 
     const auto* src  = BinaryData::host_vst_lua;
     const auto  size = static_cast<std::size_t>(BinaryData::host_vst_luaSize);

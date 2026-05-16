@@ -93,6 +93,15 @@ juce_generate_juce_header(CordialVST)
 juce_add_binary_data(CordialVST_LuaData
     SOURCES
         lua/host_vst.lua
+        lua/core/init.lua
+        lua/core/theory.lua
+        lua/core/progressions.lua
+        lua/core/rng.lua
+        lua/core/chord.lua
+        lua/core/arp.lua
+        lua/core/voicing.lua
+        lua/core/bass.lua
+        lua/core/melody.lua
 )
 
 target_sources(CordialVST PRIVATE

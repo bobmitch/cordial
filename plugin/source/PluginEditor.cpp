@@ -12,7 +12,7 @@ CordialAudioProcessorEditor::CordialAudioProcessorEditor (CordialAudioProcessor&
     diagnostic.setJustificationType (juce::Justification::centred);
     addAndMakeVisible (diagnostic);
 
-    setSize (480, 160);
+    setSize (720, 180);
 }
 
 void CordialAudioProcessorEditor::paint (juce::Graphics& g)
